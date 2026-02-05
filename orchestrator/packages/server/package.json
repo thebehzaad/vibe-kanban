@@ -27,9 +27,12 @@
     "@orchestrator/deployment": "workspace:*",
     "fastify": "^5.7.4",
     "@fastify/cors": "^11.2.0",
-    "@fastify/websocket": "^11.2.0"
+    "@fastify/websocket": "^11.2.0",
+    "@fastify/multipart": "^9.0.4",
+    "node-pty": "^1.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@types/node": "^22.15.0"
   }
 }

@@ -106,7 +106,7 @@ export const filesystemRoutes: FastifyPluginAsync = async (fastify: FastifyInsta
 
         return result;
       } catch (err) {
-        fastify.log.error(`Error reading directory ${resolvedPath}:`, err);
+        fastify.log.error({ err }, `Error reading directory ${resolvedPath}`);
         return reply.status(500).send({ error: 'Failed to read directory' });
       }
     }

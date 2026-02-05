@@ -5,15 +5,35 @@
 
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import websocket from '@fastify/websocket';
+import multipart from '@fastify/multipart';
+
+// Import all route plugins
 import { healthRoutes } from './routes/health.js';
-import { taskRoutes } from './routes/tasks.js';
+import { configRoutes } from './routes/config.js';
+import { eventRoutes } from './routes/events.js';
 import { projectRoutes } from './routes/projects.js';
+import { taskRoutes } from './routes/tasks.js';
 import { sessionRoutes } from './routes/sessions.js';
+import { repoRoutes } from './routes/repos.js';
+import { organizationRoutes } from './routes/organizations.js';
+import { tagRoutes } from './routes/tags.js';
+import { taskAttemptRoutes } from './routes/task-attempts.js';
+import { executionProcessRoutes } from './routes/execution-processes.js';
+import { approvalRoutes } from './routes/approvals.js';
+import { filesystemRoutes } from './routes/filesystem.js';
+import { imageRoutes } from './routes/images.js';
+import { scratchRoutes } from './routes/scratch.js';
+import { searchRoutes } from './routes/search.js';
+import { containerRoutes } from './routes/containers.js';
+import { terminalRoutes } from './routes/terminal.js';
+import { oauthRoutes } from './routes/oauth.js';
 
 export interface ServerConfig {
   port: number;
   host?: string;
   logger?: boolean;
+  imagesDir?: string;
 }
 
 export async function createApp(config: ServerConfig): Promise<FastifyInstance> {
@@ -27,11 +47,100 @@ export async function createApp(config: ServerConfig): Promise<FastifyInstance> 
     credentials: true
   });
 
-  // Register routes
+  // Register WebSocket support
+  await app.register(websocket);
+
+  // Register multipart/form-data support for file uploads
+  await app.register(multipart, {
+    limits: {
+      fileSize: 50 * 1024 * 1024, // 50MB max file size
+      files: 10 // Max 10 files per request
+    }
+  });
+
+  // Decorate app with config values
+  app.decorate('imagesDir', config.imagesDir ?? './images');
+
+  // ========================================
+  // Core routes
+  // ========================================
+
+  // Health check
   await app.register(healthRoutes, { prefix: '/api' });
-  await app.register(taskRoutes, { prefix: '/api' });
+
+  // System configuration
+  await app.register(configRoutes, { prefix: '/api' });
+
+  // Server-Sent Events stream
+  await app.register(eventRoutes, { prefix: '/api' });
+
+  // ========================================
+  // Entity CRUD routes
+  // ========================================
+
+  // Projects
   await app.register(projectRoutes, { prefix: '/api' });
+
+  // Tasks
+  await app.register(taskRoutes, { prefix: '/api' });
+
+  // Sessions
   await app.register(sessionRoutes, { prefix: '/api' });
+
+  // Repositories
+  await app.register(repoRoutes, { prefix: '/api' });
+
+  // Organizations
+  await app.register(organizationRoutes, { prefix: '/api' });
+
+  // Tags
+  await app.register(tagRoutes, { prefix: '/api' });
+
+  // ========================================
+  // Workspace management routes
+  // ========================================
+
+  // Task attempts (workspaces, branches, merges, PRs)
+  await app.register(taskAttemptRoutes, { prefix: '/api' });
+
+  // ========================================
+  // Execution & process routes
+  // ========================================
+
+  // Execution processes with log streaming
+  await app.register(executionProcessRoutes, { prefix: '/api' });
+
+  // Approval requests
+  await app.register(approvalRoutes, { prefix: '/api' });
+
+  // ========================================
+  // File & content routes
+  // ========================================
+
+  // Filesystem operations
+  await app.register(filesystemRoutes, { prefix: '/api' });
+
+  // Image upload/serve
+  await app.register(imageRoutes, { prefix: '/api' });
+
+  // Scratch pad storage
+  await app.register(scratchRoutes, { prefix: '/api' });
+
+  // Multi-repo search
+  await app.register(searchRoutes, { prefix: '/api' });
+
+  // ========================================
+  // Infrastructure routes
+  // ========================================
+
+  // Container management
+  await app.register(containerRoutes, { prefix: '/api' });
+
+  // Terminal WebSocket
+  await app.register(terminalRoutes, { prefix: '/api' });
+
+  // OAuth authentication
+  await app.register(oauthRoutes, { prefix: '/api' });
 
   return app;
 }
@@ -49,5 +158,12 @@ export async function startServer(config: ServerConfig): Promise<FastifyInstance
   } catch (err) {
     app.log.error(err);
     process.exit(1);
+  }
+}
+
+// Type augmentation for Fastify
+declare module 'fastify' {
+  interface FastifyInstance {
+    imagesDir: string;
   }
 }

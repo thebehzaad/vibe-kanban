@@ -11,6 +11,11 @@
  * - JWT handling
  * - Shell command utilities
  * - Diff utilities
+ * - Browser utilities
+ * - Platform detection
+ * - Process management
+ * - Port file management
+ * - Version utilities
  */
 
 export * from './path.js';
@@ -18,3 +23,9 @@ export * from './text.js';
 export * from './git.js';
 export * from './shell.js';
 export * from './diff.js';
+export * from './jwt.js';
+export * from './browser.js';
+export * from './platform.js';
+export * from './process.js';
+export * from './version.js';
+export * from './port-file.js';
