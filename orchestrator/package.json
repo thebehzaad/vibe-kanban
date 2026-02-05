@@ -1,0 +1,22 @@
+{
+  "name": "@vibe-kanban/orchestrator",
+  "version": "0.0.1",
+  "private": true,
+  "description": "TypeScript translation of vibe-kanban Rust crates",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=9"
+  }
+}

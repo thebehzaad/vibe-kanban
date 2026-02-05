@@ -1,0 +1,32 @@
+{
+  "name": "@orchestrator/server",
+  "version": "0.0.1",
+  "private": true,
+  "description": "HTTP API server - TypeScript translation of crates/server",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@orchestrator/db": "workspace:*",
+    "@orchestrator/utils": "workspace:*",
+    "@orchestrator/services": "workspace:*",
+    "@orchestrator/executors": "workspace:*",
+    "@orchestrator/deployment": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

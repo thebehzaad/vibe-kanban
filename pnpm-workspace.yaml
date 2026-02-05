@@ -1,6 +1,8 @@
 packages:
   - frontend
   - remote-frontend
+  - orchestrator
+  - orchestrator/packages/*
 
 onlyBuiltDependencies:
   - '@sentry/cli'

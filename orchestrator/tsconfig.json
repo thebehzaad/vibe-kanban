@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/db" },
+    { "path": "packages/utils" },
+    { "path": "packages/services" },
+    { "path": "packages/executors" },
+    { "path": "packages/deployment" },
+    { "path": "packages/local-deployment" },
+    { "path": "packages/server" },
+    { "path": "packages/remote" },
+    { "path": "packages/review" }
+  ]
+}
