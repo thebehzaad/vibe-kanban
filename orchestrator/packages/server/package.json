@@ -24,7 +24,10 @@
     "@orchestrator/utils": "workspace:*",
     "@orchestrator/services": "workspace:*",
     "@orchestrator/executors": "workspace:*",
-    "@orchestrator/deployment": "workspace:*"
+    "@orchestrator/deployment": "workspace:*",
+    "fastify": "^5.7.4",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/websocket": "^11.2.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
