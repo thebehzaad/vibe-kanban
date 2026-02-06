@@ -5,4 +5,8 @@
  * Shared API utilities and types.
  */
 
-export * from './response.js';
+export * from './migration.js';
+export * from './oauth.js';
+export * from './organizations.js';
+export * from './pull-requests.js';
+export * from './workspaces.js';

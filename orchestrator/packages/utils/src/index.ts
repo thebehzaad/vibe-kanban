@@ -33,3 +33,12 @@ export * from './msg-store.js';
 export * from './log-msg.js';
 export * from './exit-signal.js';
 export * from './stdout-dup.js';
+export * from './assets.js';
+export * from './response.js';
+export * from './sentry.js';
+export * from './approvals.js';
+export * from './stream-lines.js';
+export * from './tokio.js';
+
+// API types
+export * as API from './api/index.js';
