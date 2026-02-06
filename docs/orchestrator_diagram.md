@@ -1,5 +1,5 @@
 ```mermaid
-graph TD
+flowchart LR
     %% Core packages (no dependencies on other workspace crates)
     utils[utils<br/>Core utilities]
     git[git<br/>Git operations]
@@ -19,10 +19,8 @@ graph TD
     %% Deployment implementations
     local_deployment[local-deployment<br/>Local deployment impl]
   
-    %% API server
+    %% Entry points (binaries)
     server[server<br/>HTTP API server]
-  
-    %% CLI tools
     review[review<br/>PR review CLI]
   
     %% Dependencies
@@ -58,8 +56,8 @@ graph TD
   server --> db
   server --> services
   
-  review -.-> services
-  review -.-> utils
+  review --> services
+  review --> utils
   
   %% Styling
   classDef corePackage fill:#e1f5fe,stroke:#01579b,stroke-width:2px
