@@ -1,89 +1,37 @@
 /**
  * Execution Processes routes
  * Translates: crates/server/src/routes/execution_processes.rs
+ *
+ * Rust pattern: State(deployment) → deployment.db().pool / deployment.container()
+ * TS pattern:   fastify.deployment → deployment.db() → new ExecutionProcessRepository(db)
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import { emitEvent } from './events.js';
+import {
+  ExecutionProcessRepository,
+} from '@orchestrator/db';
+import type { Deployment } from '@orchestrator/deployment';
 
-// Types
-export interface ExecutionProcess {
-  id: string;
-  sessionId: string;
-  workspaceId: string;
-  executorType: string;
-  status: ExecutionStatus;
-  startedAt: string;
-  completedAt?: string;
-  error?: string;
-  metadata: Record<string, unknown>;
-}
-
-export type ExecutionStatus =
-  | 'pending'
-  | 'running'
-  | 'waiting_approval'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
-
-export interface ExecutionLog {
-  id: string;
-  processId: string;
-  timestamp: string;
-  level: 'debug' | 'info' | 'warn' | 'error';
-  message: string;
-  source?: string;
-}
-
-export interface NormalizedLog {
-  id: string;
-  processId: string;
-  timestamp: string;
-  type: NormalizedLogType;
-  content: unknown;
-}
-
-export type NormalizedLogType =
-  | 'user_message'
-  | 'assistant_message'
-  | 'tool_call'
-  | 'tool_result'
-  | 'file_edit'
-  | 'file_create'
-  | 'command_execution'
-  | 'command_output'
-  | 'approval_request'
-  | 'approval_response'
-  | 'error'
-  | 'status_change';
-
-export interface RepoState {
-  repoId: string;
-  repoPath: string;
-  branch: string;
-  commit: string;
-  isDirty: boolean;
-  changedFiles: string[];
-}
-
-// In-memory stores
-const processes = new Map<string, ExecutionProcess>();
-const processLogs = new Map<string, ExecutionLog[]>();
-const normalizedLogs = new Map<string, NormalizedLog[]>();
-const repoStates = new Map<string, RepoState[]>();
+// Re-export DB types for consumers
+export type {
+  ExecutionProcess,
+  ExecutionProcessStatus as ExecutionStatus,
+} from '@orchestrator/db';
 
 // WebSocket connections for log streaming
 const rawLogSubscribers = new Map<string, Set<any>>();
 const normalizedLogSubscribers = new Map<string, Set<any>>();
 
 export const executionProcessRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new ExecutionProcessRepository(db());
+
   // GET /api/execution-processes/:id - Get execution process
   fastify.get<{ Params: { id: string } }>(
     '/execution-processes/:id/',
     async (request, reply) => {
-      const { id } = request.params;
-      const process = processes.get(id);
+      const repo = getRepo();
+      const process = repo.findById(request.params.id);
 
       if (!process) {
         return reply.status(404).send({ error: 'Execution process not found' });
@@ -97,31 +45,23 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
   fastify.post<{ Params: { id: string } }>(
     '/execution-processes/:id/stop',
     async (request, reply) => {
+      const repo = getRepo();
       const { id } = request.params;
-      const process = processes.get(id);
+      const process = repo.findById(id);
 
       if (!process) {
         return reply.status(404).send({ error: 'Execution process not found' });
       }
 
-      if (process.status !== 'running' && process.status !== 'waiting_approval') {
+      if (process.status !== 'running') {
         return reply.status(400).send({ error: `Cannot stop process in ${process.status} status` });
       }
 
-      process.status = 'cancelled';
-      process.completedAt = new Date().toISOString();
-      processes.set(id, process);
-
-      // Emit event
-      emitEvent('execution.failed', {
-        processId: id,
-        reason: 'cancelled',
-        sessionId: process.sessionId
-      });
+      repo.updateCompletion(id, 'killed');
 
       fastify.log.info(`Execution process ${id} stopped`);
 
-      return { success: true, processId: id, status: 'cancelled' };
+      return { success: true, processId: id, status: 'killed' };
     }
   );
 
@@ -129,15 +69,45 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
   fastify.get<{ Params: { id: string } }>(
     '/execution-processes/:id/repo-states',
     async (request, reply) => {
+      const repo = getRepo();
       const { id } = request.params;
 
-      if (!processes.has(id)) {
+      const process = repo.findById(id);
+      if (!process) {
         return reply.status(404).send({ error: 'Execution process not found' });
       }
 
-      const states = repoStates.get(id) ?? [];
+      // Query repo states from DB
+      const states = db().prepare(`
+        SELECT eprs.id, eprs.execution_process_id, eprs.repo_id,
+               eprs.before_head_commit, eprs.after_head_commit, eprs.created_at,
+               r.path as repo_path, r.name as repo_name
+        FROM execution_process_repo_states eprs
+        LEFT JOIN repos r ON eprs.repo_id = r.id
+        WHERE eprs.execution_process_id = ?
+      `).all(id) as Array<{
+        id: string;
+        execution_process_id: string;
+        repo_id: string;
+        before_head_commit: string | null;
+        after_head_commit: string | null;
+        created_at: string;
+        repo_path: string | null;
+        repo_name: string | null;
+      }>;
 
-      return { processId: id, repoStates: states };
+      const repoStates = states.map(s => ({
+        id: s.id,
+        executionProcessId: s.execution_process_id,
+        repoId: s.repo_id,
+        beforeHeadCommit: s.before_head_commit ?? undefined,
+        afterHeadCommit: s.after_head_commit ?? undefined,
+        repoPath: s.repo_path ?? undefined,
+        repoName: s.repo_name ?? undefined,
+        createdAt: s.created_at,
+      }));
+
+      return { processId: id, repoStates };
     }
   );
 
@@ -146,9 +116,10 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
     '/execution-processes/:id/raw-logs/ws',
     { websocket: true } as any,
     async (socket: any, request) => {
+      const repo = getRepo();
       const { id } = request.params;
 
-      if (!processes.has(id)) {
+      if (!repo.findById(id)) {
         socket.close(4004, 'Execution process not found');
         return;
       }
@@ -161,10 +132,32 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
 
       fastify.log.info(`Raw logs WebSocket connected for process ${id}`);
 
-      // Send existing logs
-      const existingLogs = processLogs.get(id) ?? [];
+      // Send existing logs from DB
+      const existingLogs = db().prepare(`
+        SELECT id, execution_process_id, log_type, content, sequence, created_at
+        FROM execution_process_logs
+        WHERE execution_process_id = ?
+        ORDER BY sequence ASC
+      `).all(id) as Array<{
+        id: string;
+        execution_process_id: string;
+        log_type: string;
+        content: string;
+        sequence: number;
+        created_at: string;
+      }>;
+
       for (const log of existingLogs) {
-        socket.send(JSON.stringify({ type: 'log', data: log }));
+        socket.send(JSON.stringify({
+          type: 'log',
+          data: {
+            id: log.id,
+            processId: log.execution_process_id,
+            timestamp: log.created_at,
+            level: log.log_type,
+            message: log.content,
+          },
+        }));
       }
 
       socket.on('close', () => {
@@ -179,9 +172,10 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
     '/execution-processes/:id/normalized-logs/ws',
     { websocket: true } as any,
     async (socket: any, request) => {
+      const repo = getRepo();
       const { id } = request.params;
 
-      if (!processes.has(id)) {
+      if (!repo.findById(id)) {
         socket.close(4004, 'Execution process not found');
         return;
       }
@@ -194,10 +188,35 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
 
       fastify.log.info(`Normalized logs WebSocket connected for process ${id}`);
 
-      // Send existing normalized logs
-      const existingLogs = normalizedLogs.get(id) ?? [];
-      for (const log of existingLogs) {
-        socket.send(JSON.stringify({ type: 'normalized_log', data: log }));
+      // Send existing coding agent turns from DB
+      const existingTurns = db().prepare(`
+        SELECT id, execution_process_id, turn_number, prompt, response, tool_calls, created_at
+        FROM coding_agent_turns
+        WHERE execution_process_id = ?
+        ORDER BY turn_number ASC
+      `).all(id) as Array<{
+        id: string;
+        execution_process_id: string;
+        turn_number: number;
+        prompt: string | null;
+        response: string | null;
+        tool_calls: string | null;
+        created_at: string;
+      }>;
+
+      for (const turn of existingTurns) {
+        socket.send(JSON.stringify({
+          type: 'normalized_log',
+          data: {
+            id: turn.id,
+            processId: turn.execution_process_id,
+            timestamp: turn.created_at,
+            turnNumber: turn.turn_number,
+            prompt: turn.prompt,
+            response: turn.response,
+            toolCalls: turn.tool_calls ? JSON.parse(turn.tool_calls) : undefined,
+          },
+        }));
       }
 
       socket.on('close', () => {
@@ -212,19 +231,17 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
     '/execution-processes/stream/session/ws',
     { websocket: true } as any,
     async (socket: any, request) => {
+      const repo = getRepo();
       const { session_id, show_soft_deleted } = request.query;
 
       fastify.log.info(`Process stream WebSocket connected for session ${session_id}`);
 
-      // Send existing processes for this session
-      const sessionProcesses = Array.from(processes.values())
-        .filter(p => p.sessionId === session_id);
+      // Send existing processes for this session from DB
+      const sessionProcesses = repo.findBySessionId(session_id, !!show_soft_deleted);
 
       for (const process of sessionProcesses) {
         socket.send(JSON.stringify({ type: 'process', data: process }));
       }
-
-      // TODO: Subscribe to process updates for this session
 
       socket.on('close', () => {
         fastify.log.info(`Process stream WebSocket disconnected for session ${session_id}`);
@@ -233,71 +250,34 @@ export const executionProcessRoutes: FastifyPluginAsync = async (fastify: Fastif
   );
 };
 
-// Helper functions for managing execution processes
-export function createExecutionProcess(
-  sessionId: string,
-  workspaceId: string,
-  executorType: string,
-  metadata: Record<string, unknown> = {}
-): ExecutionProcess {
+// Helper functions for managing execution processes (used by other route modules)
+// Accept Deployment to match Rust pattern where these would go through deployment services
+export function addRawLog(
+  deployment: Deployment,
+  processId: string,
+  level: string,
+  message: string,
+): void {
+  const dbService = deployment.db();
+
+  // Get next sequence number
+  const seqRow = dbService.prepare(
+    'SELECT COALESCE(MAX(sequence), 0) + 1 as next_seq FROM execution_process_logs WHERE execution_process_id = ?'
+  ).get(processId) as { next_seq: number };
+
   const id = crypto.randomUUID();
-  const process: ExecutionProcess = {
-    id,
-    sessionId,
-    workspaceId,
-    executorType,
-    status: 'pending',
-    startedAt: new Date().toISOString(),
-    metadata
-  };
+  dbService.prepare(`
+    INSERT INTO execution_process_logs (id, execution_process_id, log_type, content, sequence, created_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+  `).run(id, processId, level, message, seqRow.next_seq);
 
-  processes.set(id, process);
-  processLogs.set(id, []);
-  normalizedLogs.set(id, []);
-
-  emitEvent('execution.started', { processId: id, sessionId, workspaceId });
-
-  return process;
-}
-
-export function updateProcessStatus(processId: string, status: ExecutionStatus, error?: string): void {
-  const process = processes.get(processId);
-  if (!process) return;
-
-  process.status = status;
-  if (error) process.error = error;
-  if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-    process.completedAt = new Date().toISOString();
-  }
-
-  processes.set(processId, process);
-
-  if (status === 'completed') {
-    emitEvent('execution.completed', { processId, sessionId: process.sessionId });
-  } else if (status === 'failed') {
-    emitEvent('execution.failed', { processId, error, sessionId: process.sessionId });
-  }
-}
-
-export function addRawLog(processId: string, level: ExecutionLog['level'], message: string, source?: string): void {
-  const logs = processLogs.get(processId);
-  if (!logs) return;
-
-  const log: ExecutionLog = {
-    id: crypto.randomUUID(),
-    processId,
-    timestamp: new Date().toISOString(),
-    level,
-    message,
-    source
-  };
-
-  logs.push(log);
-
-  // Broadcast to subscribers
+  // Broadcast to WebSocket subscribers
   const subscribers = rawLogSubscribers.get(processId);
   if (subscribers) {
-    const data = JSON.stringify({ type: 'log', data: log });
+    const data = JSON.stringify({
+      type: 'log',
+      data: { id, processId, timestamp: new Date().toISOString(), level, message },
+    });
     for (const socket of subscribers) {
       try {
         socket.send(data);
@@ -306,28 +286,27 @@ export function addRawLog(processId: string, level: ExecutionLog['level'], messa
       }
     }
   }
-
-  emitEvent('execution.log', { processId, log });
 }
 
-export function addNormalizedLog(processId: string, type: NormalizedLogType, content: unknown): void {
-  const logs = normalizedLogs.get(processId);
-  if (!logs) return;
-
-  const log: NormalizedLog = {
-    id: crypto.randomUUID(),
-    processId,
-    timestamp: new Date().toISOString(),
-    type,
-    content
-  };
-
-  logs.push(log);
-
-  // Broadcast to subscribers
+export function addNormalizedLog(
+  _deployment: Deployment,
+  processId: string,
+  type: string,
+  content: unknown
+): void {
+  // Broadcast to WebSocket subscribers
   const subscribers = normalizedLogSubscribers.get(processId);
   if (subscribers) {
-    const data = JSON.stringify({ type: 'normalized_log', data: log });
+    const data = JSON.stringify({
+      type: 'normalized_log',
+      data: {
+        id: crypto.randomUUID(),
+        processId,
+        timestamp: new Date().toISOString(),
+        type,
+        content,
+      },
+    });
     for (const socket of subscribers) {
       try {
         socket.send(data);
@@ -336,12 +315,4 @@ export function addNormalizedLog(processId: string, type: NormalizedLogType, con
       }
     }
   }
-}
-
-export function setRepoStates(processId: string, states: RepoState[]): void {
-  repoStates.set(processId, states);
-}
-
-export function getProcess(processId: string): ExecutionProcess | undefined {
-  return processes.get(processId);
 }

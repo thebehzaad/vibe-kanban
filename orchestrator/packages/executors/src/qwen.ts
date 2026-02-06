@@ -1,6 +1,6 @@
 /**
- * Google Gemini CLI executor
- * Translates: crates/executors/src/executors/gemini.rs
+ * Qwen Code executor
+ * Translates: crates/executors/src/executors/qwen.rs
  */
 
 import { BaseExecutor } from './base.js';
@@ -10,43 +10,41 @@ import type {
   ExecutorType, NormalizeResult, SpawnedChild,
 } from './types.js';
 
-export interface GeminiConfig extends ExecutorConfig {
-  type: 'gemini';
-  apiKey?: string;
-  model?: string; // defaults to gemini-2.5-pro
+export interface QwenConfig extends ExecutorConfig {
+  type: 'qwen';
+  model?: string;
 }
 
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-pro';
-
-export class GeminiExecutor extends BaseExecutor {
+export class QwenExecutor extends BaseExecutor {
   private sessions = new Map<string, ExecutorSession>();
-  constructor(config: GeminiConfig) { super(config); }
-  get name(): string { return 'Gemini'; }
-  get type(): ExecutorType { return 'gemini'; }
-  private get geminiConfig(): GeminiConfig { return this.config as GeminiConfig; }
+  constructor(config: QwenConfig) { super(config); }
+  get name(): string { return 'Qwen Code'; }
+  get type(): ExecutorType { return 'qwen'; }
+  private get qwenConfig(): QwenConfig { return this.config as QwenConfig; }
 
   async resolveCommand(): Promise<{ command: string; args: string[] } | undefined> {
-    const geminiPath = which('gemini');
-    if (geminiPath) {
-      return { command: geminiPath, args: [] };
+    const qwenPath = which('qwen-code');
+    if (qwenPath) {
+      return { command: qwenPath, args: [] };
     }
 
     return undefined;
   }
 
-  /** Build command-line arguments for gemini */
+  /** Build command-line arguments for qwen-code */
   buildArgs(request: ExecutionRequest): string[] {
     const args: string[] = [];
 
-    const model = this.geminiConfig.model ?? DEFAULT_GEMINI_MODEL;
-    args.push('--model', model);
+    if (this.qwenConfig.model) {
+      args.push('--model', this.qwenConfig.model);
+    }
 
     args.push('--prompt', request.prompt);
 
     return args;
   }
 
-  /** Spawn Gemini as a child process */
+  /** Spawn Qwen Code as a child process */
   async spawn(request: ExecutionRequest, msgStore: MsgStore): Promise<SpawnedChild | undefined> {
     const resolved = await this.resolveCommand();
     if (!resolved) return undefined;
@@ -54,9 +52,6 @@ export class GeminiExecutor extends BaseExecutor {
     const args = [...resolved.args, ...this.buildArgs(request)];
 
     const env: Record<string, string> = { ...process.env as Record<string, string> };
-    if (this.geminiConfig.apiKey) {
-      env.GEMINI_API_KEY = this.geminiConfig.apiKey;
-    }
     if (request.env) {
       Object.assign(env, request.env);
     }
@@ -71,15 +66,12 @@ export class GeminiExecutor extends BaseExecutor {
   async execute(request: ExecutionRequest): Promise<ExecutionResult> {
     const resolved = await this.resolveCommand();
     if (!resolved) {
-      return { success: false, output: '', error: 'Gemini CLI not found' };
+      return { success: false, output: '', error: 'Qwen Code CLI not found' };
     }
 
     const args = [...resolved.args, ...this.buildArgs(request)];
 
     const env: Record<string, string> = { ...process.env as Record<string, string> };
-    if (this.geminiConfig.apiKey) {
-      env.GEMINI_API_KEY = this.geminiConfig.apiKey;
-    }
     if (request.env) {
       Object.assign(env, request.env);
     }
@@ -100,7 +92,7 @@ export class GeminiExecutor extends BaseExecutor {
   async createSession(): Promise<ExecutorSession> {
     const session: ExecutorSession = {
       id: crypto.randomUUID(),
-      executorType: 'gemini',
+      executorType: 'qwen',
       messages: [],
       createdAt: new Date(),
     };

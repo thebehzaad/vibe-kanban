@@ -25,7 +25,6 @@ export { taskRoutes, type Task, type CreateTaskBody, type UpdateTaskBody } from 
 export {
   sessionRoutes,
   type Session,
-  type SessionMessage,
   type CreateSessionBody,
   type QueueMessageBody
 } from './sessions.js';
@@ -36,7 +35,8 @@ export {
   type Remote,
   type PullRequest,
   type CreateRepoBody,
-  type UpdateRepoBody
+  type UpdateRepoBody,
+  type InitRepoBody
 } from './repos.js';
 export {
   organizationRoutes,
@@ -61,7 +61,8 @@ export {
   type UpdateWorkspaceBody,
   type CreatePRBody,
   type RebaseBody,
-  type MergeBody
+  type MergeBody,
+  updateWorkspaceDiff
 } from './task-attempts.js';
 
 // Execution & processes
@@ -69,12 +70,6 @@ export {
   executionProcessRoutes,
   type ExecutionProcess,
   type ExecutionStatus,
-  type ExecutionLog,
-  type NormalizedLog,
-  type NormalizedLogType,
-  type RepoState,
-  createExecutionProcess,
-  updateProcessStatus,
   addRawLog,
   addNormalizedLog
 } from './execution-processes.js';
@@ -102,6 +97,8 @@ export {
   scratchRoutes,
   type ScratchType,
   type ScratchItem,
+  type CreateScratchBody,
+  type UpdateScratchBody,
   getScratchItem,
   setScratchItem
 } from './scratch.js';
@@ -116,9 +113,6 @@ export {
 export {
   containerRoutes,
   type ContainerInfo,
-  type WorkspaceContext,
-  registerContainer,
-  registerWorkspaceContext
 } from './containers.js';
 export {
   terminalRoutes,

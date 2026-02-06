@@ -29,3 +29,7 @@ export * from './platform.js';
 export * from './process.js';
 export * from './version.js';
 export * from './port-file.js';
+export * from './msg-store.js';
+export * from './log-msg.js';
+export * from './exit-signal.js';
+export * from './stdout-dup.js';

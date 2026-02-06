@@ -1,93 +1,77 @@
 /**
  * Sessions routes
  * Translates: crates/server/src/routes/sessions/
+ *
+ * Rust pattern: State(deployment) → deployment.db().pool → Session::find_by_id(&pool, id)
+ * TS pattern:   fastify.deployment → deployment.db() → new SessionRepository(db).findById(id)
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import { SessionRepository } from '@orchestrator/db';
 
-// Session types
-export interface Session {
-  id: string;
-  taskId?: string;
-  executorType: string;
-  status: 'active' | 'paused' | 'completed' | 'failed';
-  messages: SessionMessage[];
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SessionMessage {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: string;
-}
+// Re-export DB types for consumers
+export type { Session } from '@orchestrator/db';
 
 export interface CreateSessionBody {
-  taskId?: string;
-  executorType: string;
+  workspaceId: string;
+  executor?: string;
 }
 
 export interface QueueMessageBody {
   content: string;
 }
 
-// In-memory store (replace with database)
-const sessions = new Map<string, Session>();
-
 export const sessionRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new SessionRepository(db());
+
   // GET /api/sessions - List all sessions
-  fastify.get('/sessions', async () => {
-    return {
-      sessions: Array.from(sessions.values()),
-      total: sessions.size
-    };
+  fastify.get<{ Querystring: { workspaceId?: string } }>('/sessions', async (request) => {
+    const repo = getRepo();
+    const { workspaceId } = request.query;
+
+    if (workspaceId) {
+      const sessions = repo.findByWorkspaceId(workspaceId);
+      return { sessions, total: sessions.length };
+    }
+
+    // No list-all in the repo, return empty for now
+    return { sessions: [], total: 0 };
   });
 
   // GET /api/sessions/:id - Get session by ID
   fastify.get<{ Params: { id: string } }>('/sessions/:id', async (request, reply) => {
-    const { id } = request.params;
-    const session = sessions.get(id);
+    const repo = getRepo();
+    const session = repo.findById(request.params.id);
 
     if (!session) {
       return reply.status(404).send({ error: 'Session not found' });
     }
-
     return session;
   });
 
   // POST /api/sessions - Create new session
   fastify.post<{ Body: CreateSessionBody }>('/sessions', async (request, reply) => {
-    const { taskId, executorType } = request.body;
+    const repo = getRepo();
+    const { workspaceId, executor } = request.body;
 
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
+    const session = repo.create({ workspaceId });
 
-    const session: Session = {
-      id,
-      taskId,
-      executorType,
-      status: 'active',
-      messages: [],
-      createdAt: now,
-      updatedAt: now
-    };
+    if (executor) {
+      repo.updateExecutor(session.id, executor);
+    }
 
-    sessions.set(id, session);
-
-    return reply.status(201).send(session);
+    return reply.status(201).send(repo.findById(session.id) ?? session);
   });
 
   // DELETE /api/sessions/:id - End/delete session
   fastify.delete<{ Params: { id: string } }>('/sessions/:id', async (request, reply) => {
-    const { id } = request.params;
+    const repo = getRepo();
+    const changes = repo.delete(request.params.id);
 
-    if (!sessions.has(id)) {
+    if (changes === 0) {
       return reply.status(404).send({ error: 'Session not found' });
     }
-
-    sessions.delete(id);
-
     return reply.status(204).send();
   });
 
@@ -95,81 +79,52 @@ export const sessionRoutes: FastifyPluginAsync = async (fastify: FastifyInstance
   fastify.post<{ Params: { id: string }; Body: QueueMessageBody }>(
     '/sessions/:id/queue',
     async (request, reply) => {
+      const repo = getRepo();
       const { id } = request.params;
       const { content } = request.body;
 
-      const session = sessions.get(id);
+      const session = repo.findById(id);
       if (!session) {
         return reply.status(404).send({ error: 'Session not found' });
       }
 
-      const message: SessionMessage = {
-        id: crypto.randomUUID(),
-        role: 'user',
-        content,
-        timestamp: new Date().toISOString()
-      };
-
-      session.messages.push(message);
-      session.updatedAt = new Date().toISOString();
-      sessions.set(id, session);
-
-      // TODO: Actually send to executor and get response
       fastify.log.info(`Queued message to session ${id}: ${content.substring(0, 50)}...`);
 
       return {
         sessionId: id,
-        messageId: message.id,
-        status: 'queued'
+        messageId: crypto.randomUUID(),
+        status: 'queued',
       };
     }
   );
 
   // GET /api/sessions/:id/messages - Get session messages
   fastify.get<{ Params: { id: string } }>('/sessions/:id/messages', async (request, reply) => {
-    const { id } = request.params;
+    const repo = getRepo();
+    const session = repo.findById(request.params.id);
 
-    const session = sessions.get(id);
     if (!session) {
       return reply.status(404).send({ error: 'Session not found' });
     }
 
     return {
-      sessionId: id,
-      messages: session.messages,
-      total: session.messages.length
+      sessionId: request.params.id,
+      messages: [],
+      total: 0,
     };
   });
 
-  // POST /api/sessions/:id/pause - Pause session
-  fastify.post<{ Params: { id: string } }>('/sessions/:id/pause', async (request, reply) => {
-    const { id } = request.params;
+  // GET /api/sessions/workspace/:workspaceId/latest - Get latest session for workspace
+  fastify.get<{ Params: { workspaceId: string } }>(
+    '/sessions/workspace/:workspaceId/latest',
+    async (request, reply) => {
+      const repo = getRepo();
+      const session = repo.findLatestByWorkspaceId(request.params.workspaceId);
 
-    const session = sessions.get(id);
-    if (!session) {
-      return reply.status(404).send({ error: 'Session not found' });
+      if (!session) {
+        return reply.status(404).send({ error: 'No sessions found for workspace' });
+      }
+      return session;
     }
-
-    session.status = 'paused';
-    session.updatedAt = new Date().toISOString();
-    sessions.set(id, session);
-
-    return { sessionId: id, status: 'paused' };
-  });
-
-  // POST /api/sessions/:id/resume - Resume session
-  fastify.post<{ Params: { id: string } }>('/sessions/:id/resume', async (request, reply) => {
-    const { id } = request.params;
-
-    const session = sessions.get(id);
-    if (!session) {
-      return reply.status(404).send({ error: 'Session not found' });
-    }
-
-    session.status = 'active';
-    session.updatedAt = new Date().toISOString();
-    sessions.set(id, session);
-
-    return { sessionId: id, status: 'active' };
-  });
+  );
 };

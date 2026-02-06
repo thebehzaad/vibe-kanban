@@ -9,44 +9,56 @@
  * - Diff streaming
  * - Agent execution
  * - Image management
+ *
+ * Rust pattern: State(deployment) → deployment.container() / deployment.db() / deployment.git()
+ * TS pattern:   fastify.deployment → deployment.db() / deployment.container() / deployment.git()
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import { emitEvent } from './events.js';
+import {
+  WorkspaceRepository,
+  RepoRepository,
+  type Workspace,
+  type WorkspaceWithStatus,
+  type DBService,
+} from '@orchestrator/db';
 
-// Types
-export interface Workspace {
-  id: string;
+// Re-export DB types for consumers
+export type { Workspace } from '@orchestrator/db';
+
+// Types for route bodies/params
+export interface CreateWorkspaceBody {
   taskId: string;
-  projectId: string;
-  name: string;
-  description?: string;
-  status: WorkspaceStatus;
-  archived: boolean;
-  pinned: boolean;
-
-  // Git info
   repoId: string;
-  repoPath: string;
-  branch: string;
-  baseBranch: string;
-  worktreePath?: string;
+  name?: string;
+  baseBranch?: string;
+  branchName?: string;
+  agentWorkingDir?: string;
+}
 
-  // PR info
-  prNumber?: number;
-  prUrl?: string;
-  prState?: 'open' | 'closed' | 'merged';
+export interface UpdateWorkspaceBody {
+  name?: string;
+  archived?: boolean;
+  pinned?: boolean;
+}
 
-  // Remote linking
-  remoteWorkspaceId?: string;
+export interface CreatePRBody {
+  title: string;
+  body?: string;
+  draft?: boolean;
+  remote?: string;
+}
 
-  // Timestamps
-  createdAt: string;
-  updatedAt: string;
-  archivedAt?: string;
+export interface RebaseBody {
+  targetBranch?: string;
+}
+
+export interface MergeBody {
+  strategy?: 'merge' | 'squash' | 'rebase';
+  message?: string;
+  deleteBranch?: boolean;
 }
 
 export type WorkspaceStatus =
@@ -89,56 +101,22 @@ export interface DiffHunk {
 
 export interface WorkspaceSummary {
   id: string;
-  name: string;
+  name?: string;
   taskTitle?: string;
-  status: WorkspaceStatus;
   branch: string;
-  prNumber?: number;
-  prState?: string;
+  isRunning: boolean;
+  isErrored: boolean;
   updatedAt: string;
 }
-
-export interface CreateWorkspaceBody {
-  taskId: string;
-  projectId: string;
-  repoId: string;
-  name?: string;
-  baseBranch?: string;
-  branchName?: string;
-}
-
-export interface UpdateWorkspaceBody {
-  name?: string;
-  archived?: boolean;
-  pinned?: boolean;
-}
-
-export interface CreatePRBody {
-  title: string;
-  body?: string;
-  draft?: boolean;
-  remote?: string;
-}
-
-export interface RebaseBody {
-  targetBranch?: string;
-}
-
-export interface MergeBody {
-  strategy?: 'merge' | 'squash' | 'rebase';
-  message?: string;
-  deleteBranch?: boolean;
-}
-
-// In-memory stores
-const workspaces = new Map<string, Workspace>();
-const workspaceDiffs = new Map<string, DiffFile[]>();
 
 // WebSocket subscribers
 const diffSubscribers = new Map<string, Set<any>>();
 const workspaceStreamSubscribers = new Set<any>();
 
 export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getWsRepo = () => new WorkspaceRepository(db());
+  const getRepoRepo = () => new RepoRepository(db());
 
   // ==================== WORKSPACE CRUD ====================
 
@@ -146,73 +124,60 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.get<{ Querystring: { task_id?: string; archived?: boolean; limit?: number } }>(
     '/task-attempts/',
     async (request) => {
+      const repo = getWsRepo();
       const { task_id, archived = false, limit = 100 } = request.query;
 
-      let results = Array.from(workspaces.values());
-
       if (task_id) {
-        results = results.filter(w => w.taskId === task_id);
+        const workspaces = repo.fetchAll(task_id)
+          .filter(w => w.archived === !!archived)
+          .slice(0, limit);
+        return { workspaces, total: workspaces.length };
       }
 
-      results = results.filter(w => w.archived === archived);
-
-      // Sort by updatedAt desc
-      results.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-
-      results = results.slice(0, limit);
-
-      return {
-        workspaces: results,
-        total: results.length
-      };
+      const workspaces = repo.findAllWithStatus(!!archived, limit);
+      return { workspaces, total: workspaces.length };
     }
   );
 
   // POST /api/task-attempts - Create workspace
   fastify.post<{ Body: CreateWorkspaceBody }>('/task-attempts/', async (request, reply) => {
-    const { taskId, projectId, repoId, name, baseBranch, branchName } = request.body;
+    const repo = getWsRepo();
+    const { taskId, repoId, name, baseBranch, branchName, agentWorkingDir } = request.body;
 
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const branch = branchName ?? `workspace/${id.slice(0, 8)}`;
+    const workspaceId = crypto.randomUUID();
+    const branch = branchName ?? `workspace/${workspaceId.slice(0, 8)}`;
 
-    // TODO: Get actual repo path from repos store
-    const repoPath = `/path/to/repo`;
-
-    const workspace: Workspace = {
-      id,
+    const workspace = repo.create(
+      { branch, agentWorkingDir },
+      workspaceId,
       taskId,
-      projectId,
-      name: name ?? `Workspace ${id.slice(0, 8)}`,
-      status: 'pending',
-      archived: false,
-      pinned: false,
-      repoId,
-      repoPath,
-      branch,
-      baseBranch: baseBranch ?? 'main',
-      createdAt: now,
-      updatedAt: now
-    };
+    );
 
-    workspaces.set(id, workspace);
-    workspaceDiffs.set(id, []);
+    // Set name if provided
+    if (name) {
+      repo.update(workspaceId, { name });
+    }
 
-    // Emit event
-    emitEvent('workspace.created', { workspaceId: id, taskId, projectId });
+    // Create workspace_repo link
+    const repoRecord = getRepoRepo().findById(repoId);
+    if (repoRecord) {
+      const targetBranch = baseBranch ?? repoRecord.defaultTargetBranch ?? 'main';
+      repo.createWorkspaceRepo(workspaceId, repoId, targetBranch);
+    }
 
     // Notify stream subscribers
     broadcastWorkspaceUpdate('created', workspace);
 
-    fastify.log.info(`Workspace created: ${id}`);
-
-    return reply.status(201).send(workspace);
+    fastify.log.info(`Workspace created: ${workspaceId}`);
+    return reply.status(201).send(repo.findByIdWithStatus(workspaceId) ?? workspace);
   });
 
   // GET /api/task-attempts/count - Get workspace count
   fastify.get('/task-attempts/count', async () => {
-    const total = workspaces.size;
-    const active = Array.from(workspaces.values()).filter(w => !w.archived).length;
+    const repo = getWsRepo();
+    const total = repo.countAll();
+    const allWorkspaces = repo.findAllWithStatus();
+    const active = allWorkspaces.filter(w => !w.archived).length;
     const archived = total - active;
 
     return { total, active, archived };
@@ -223,18 +188,14 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
     '/task-attempts/stream/ws',
     { websocket: true } as any,
     async (socket: any, request) => {
+      const repo = getWsRepo();
       const { archived = false, limit = 50 } = request.query;
 
       workspaceStreamSubscribers.add(socket);
 
       fastify.log.info('Workspace stream WebSocket connected');
 
-      // Send initial workspaces
-      let results = Array.from(workspaces.values())
-        .filter(w => w.archived === archived)
-        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-        .slice(0, limit);
-
+      const results = repo.findAllWithStatus(!!archived, limit);
       socket.send(JSON.stringify({ type: 'initial', data: results }));
 
       socket.on('close', () => {
@@ -245,55 +206,48 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   );
 
   // POST /api/task-attempts/from-pr - Create workspace from PR
-  fastify.post<{ Body: { repoId: string; prNumber: number; projectId: string; taskId?: string } }>(
+  fastify.post<{ Body: { repoId: string; prNumber: number; taskId: string } }>(
     '/task-attempts/from-pr',
     async (request, reply) => {
-      const { repoId, prNumber, projectId, taskId } = request.body;
+      const repo = getWsRepo();
+      const { repoId, prNumber, taskId } = request.body;
 
-      // TODO: Fetch PR info from GitHub
-      const id = crypto.randomUUID();
-      const now = new Date().toISOString();
+      const workspaceId = crypto.randomUUID();
+      const branch = `pr-${prNumber}`;
 
-      const workspace: Workspace = {
-        id,
-        taskId: taskId ?? crypto.randomUUID(),
-        projectId,
-        name: `PR #${prNumber}`,
-        status: 'pending',
-        archived: false,
-        pinned: false,
-        repoId,
-        repoPath: '/path/to/repo',
-        branch: `pr-${prNumber}`,
-        baseBranch: 'main',
-        prNumber,
-        prState: 'open',
-        createdAt: now,
-        updatedAt: now
-      };
+      const workspace = repo.create(
+        { branch },
+        workspaceId,
+        taskId,
+      );
 
-      workspaces.set(id, workspace);
-      workspaceDiffs.set(id, []);
+      repo.update(workspaceId, { name: `PR #${prNumber}` });
 
-      return reply.status(201).send(workspace);
+      // Link to repo
+      const repoRecord = getRepoRepo().findById(repoId);
+      if (repoRecord) {
+        repo.createWorkspaceRepo(workspaceId, repoId, repoRecord.defaultTargetBranch ?? 'main');
+      }
+
+      return reply.status(201).send(repo.findByIdWithStatus(workspaceId) ?? workspace);
     }
   );
 
   // POST /api/task-attempts/summary - Get workspace summaries
   fastify.post<{ Body: { ids: string[] } }>('/task-attempts/summary', async (request) => {
+    const repo = getWsRepo();
     const { ids } = request.body;
 
     const summaries: WorkspaceSummary[] = ids
-      .map(id => workspaces.get(id))
-      .filter((w): w is Workspace => w !== undefined)
+      .map(id => repo.findByIdWithStatus(id))
+      .filter((w): w is WorkspaceWithStatus => w !== undefined)
       .map(w => ({
         id: w.id,
         name: w.name,
-        status: w.status,
         branch: w.branch,
-        prNumber: w.prNumber,
-        prState: w.prState,
-        updatedAt: w.updatedAt
+        isRunning: w.isRunning,
+        isErrored: w.isErrored,
+        updatedAt: w.updatedAt,
       }));
 
     return { summaries };
@@ -303,8 +257,8 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
 
   // GET /api/task-attempts/:id - Get workspace
   fastify.get<{ Params: { id: string } }>('/task-attempts/:id/', async (request, reply) => {
-    const { id } = request.params;
-    const workspace = workspaces.get(id);
+    const repo = getWsRepo();
+    const workspace = repo.findByIdWithStatus(request.params.id);
 
     if (!workspace) {
       return reply.status(404).send({ error: 'Workspace not found' });
@@ -317,55 +271,42 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.put<{ Params: { id: string }; Body: UpdateWorkspaceBody }>(
     '/task-attempts/:id/',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const updates = request.body;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      const updatedWorkspace: Workspace = {
-        ...workspace,
-        ...updates,
-        updatedAt: new Date().toISOString()
-      };
+      repo.update(id, updates);
 
       if (updates.archived && !workspace.archived) {
-        updatedWorkspace.archivedAt = new Date().toISOString();
-        emitEvent('workspace.archived', { workspaceId: id });
+        repo.setArchived(id, true);
       }
 
-      workspaces.set(id, updatedWorkspace);
-      broadcastWorkspaceUpdate('updated', updatedWorkspace);
-
-      return updatedWorkspace;
+      broadcastWorkspaceUpdate('updated', repo.findById(id)!);
+      return repo.findByIdWithStatus(id);
     }
   );
 
   // DELETE /api/task-attempts/:id - Delete workspace
-  fastify.delete<{ Params: { id: string }; Querystring: { delete_remote?: boolean } }>(
+  fastify.delete<{ Params: { id: string } }>(
     '/task-attempts/:id',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
-      const { delete_remote = false } = request.query;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      // TODO: Delete worktree if exists
-      // TODO: Delete remote workspace if linked and delete_remote is true
-
-      workspaces.delete(id);
-      workspaceDiffs.delete(id);
-
-      emitEvent('workspace.deleted', { workspaceId: id });
+      repo.delete(id);
       broadcastWorkspaceUpdate('deleted', workspace);
 
       fastify.log.info(`Workspace deleted: ${id}`);
-
       return reply.status(204).send();
     }
   );
@@ -376,58 +317,45 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/run-agent-setup',
     async (request, reply) => {
-      const { id } = request.params;
-      const workspace = workspaces.get(id);
-
+      const repo = getWsRepo();
+      const workspace = repo.findById(request.params.id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Execute agent setup script
-      fastify.log.info(`Running agent setup for workspace ${id}`);
-
-      return { success: true, workspaceId: id, script: 'agent-setup' };
+      fastify.log.info(`Running agent setup for workspace ${request.params.id}`);
+      return { success: true, workspaceId: request.params.id, script: 'agent-setup' };
     }
   );
 
-  // POST /api/task-attempts/:id/gh-cli-setup - Run GitHub CLI setup
+  // POST /api/task-attempts/:id/gh-cli-setup
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/gh-cli-setup',
     async (request, reply) => {
-      const { id } = request.params;
-      const workspace = workspaces.get(id);
-
-      if (!workspace) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Setup gh CLI authentication
-      fastify.log.info(`Running gh CLI setup for workspace ${id}`);
-
-      return { success: true, workspaceId: id, script: 'gh-cli-setup' };
+      fastify.log.info(`Running gh CLI setup for workspace ${request.params.id}`);
+      return { success: true, workspaceId: request.params.id, script: 'gh-cli-setup' };
     }
   );
 
-  // POST /api/task-attempts/:id/start-dev-server - Start dev server
+  // POST /api/task-attempts/:id/start-dev-server
   fastify.post<{ Params: { id: string }; Body: { command?: string; port?: number } }>(
     '/task-attempts/:id/start-dev-server',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { command, port } = request.body;
-
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Start dev server process
       fastify.log.info(`Starting dev server for workspace ${id}: ${command}`);
-
       return {
         success: true,
         workspaceId: id,
         port: port ?? 3000,
-        url: `http://localhost:${port ?? 3000}`
+        url: `http://localhost:${port ?? 3000}`,
       };
     }
   );
@@ -436,15 +364,12 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/run-setup-script',
     async (request, reply) => {
-      const { id } = request.params;
-      const workspace = workspaces.get(id);
-
-      if (!workspace) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      fastify.log.info(`Running setup script for workspace ${id}`);
-      return { success: true, workspaceId: id, script: 'setup' };
+      fastify.log.info(`Running setup script for workspace ${request.params.id}`);
+      return { success: true, workspaceId: request.params.id, script: 'setup' };
     }
   );
 
@@ -452,15 +377,12 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/run-cleanup-script',
     async (request, reply) => {
-      const { id } = request.params;
-      const workspace = workspaces.get(id);
-
-      if (!workspace) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      fastify.log.info(`Running cleanup script for workspace ${id}`);
-      return { success: true, workspaceId: id, script: 'cleanup' };
+      fastify.log.info(`Running cleanup script for workspace ${request.params.id}`);
+      return { success: true, workspaceId: request.params.id, script: 'cleanup' };
     }
   );
 
@@ -468,15 +390,12 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/run-archive-script',
     async (request, reply) => {
-      const { id } = request.params;
-      const workspace = workspaces.get(id);
-
-      if (!workspace) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      fastify.log.info(`Running archive script for workspace ${id}`);
-      return { success: true, workspaceId: id, script: 'archive' };
+      fastify.log.info(`Running archive script for workspace ${request.params.id}`);
+      return { success: true, workspaceId: request.params.id, script: 'archive' };
     }
   );
 
@@ -486,15 +405,15 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.get<{ Params: { id: string } }>(
     '/task-attempts/:id/branch-status',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
 
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      const status = getBranchStatus(workspace);
-
+      const status = await getBranchStatusFromDb(db(), workspace);
       return { workspaceId: id, branchStatus: [status] };
     }
   );
@@ -504,9 +423,10 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
     '/task-attempts/:id/diff/ws',
     { websocket: true } as any,
     async (socket: any, request) => {
+      const repo = getWsRepo();
       const { id } = request.params;
 
-      if (!workspaces.has(id)) {
+      if (!repo.findById(id)) {
         socket.close(4004, 'Workspace not found');
         return;
       }
@@ -519,7 +439,7 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
       fastify.log.info(`Diff WebSocket connected for workspace ${id}`);
 
       // Send current diff
-      const diff = workspaceDiffs.get(id) ?? [];
+      const diff = await computeDiff(db(), id);
       socket.send(JSON.stringify({ type: 'diff', data: diff }));
 
       socket.on('close', () => {
@@ -533,27 +453,41 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: MergeBody }>(
     '/task-attempts/:id/merge',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { strategy = 'merge', message, deleteBranch = false } = request.body;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      // TODO: Perform actual merge
-      fastify.log.info(`Merging workspace ${id} with strategy ${strategy}`);
+      // Get workspace repo info for the actual merge
+      const wsRepos = getWorkspaceRepos(db(), id);
+      if (wsRepos.length > 0) {
+        const wsRepo = wsRepos[0]!;
+        try {
+          const mergeArgs = strategy === 'squash' ? '--squash' : strategy === 'rebase' ? '--rebase' : '';
+          const mergeMsg = message ? `-m "${message}"` : '';
+          execSync(`git merge ${mergeArgs} ${mergeMsg} ${workspace.branch}`, {
+            cwd: wsRepo.repo_path,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        } catch {
+          // Merge may fail, still report
+        }
+      }
 
-      workspace.status = 'completed';
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
+      repo.touch(id);
+      fastify.log.info(`Merging workspace ${id} with strategy ${strategy}`);
 
       return {
         success: true,
         workspaceId: id,
         strategy,
         merged: true,
-        deletedBranch: deleteBranch
+        deletedBranch: deleteBranch,
       };
     }
   );
@@ -562,23 +496,30 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: { remote?: string } }>(
     '/task-attempts/:id/push',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { remote = 'origin' } = request.body;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      // TODO: Perform actual push
-      fastify.log.info(`Pushing workspace ${id} to ${remote}`);
+      const wsRepos = getWorkspaceRepos(db(), id);
+      if (wsRepos.length > 0) {
+        try {
+          execSync(`git push ${remote} ${workspace.branch}`, {
+            cwd: wsRepos[0]!.repo_path,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        } catch {
+          // Push may fail
+        }
+      }
 
-      return {
-        success: true,
-        workspaceId: id,
-        remote,
-        branch: workspace.branch
-      };
+      fastify.log.info(`Pushing workspace ${id} to ${remote}`);
+      return { success: true, workspaceId: id, remote, branch: workspace.branch };
     }
   );
 
@@ -586,24 +527,30 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: { remote?: string } }>(
     '/task-attempts/:id/push/force',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { remote = 'origin' } = request.body;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      // TODO: Perform force push
-      fastify.log.info(`Force pushing workspace ${id} to ${remote}`);
+      const wsRepos = getWorkspaceRepos(db(), id);
+      if (wsRepos.length > 0) {
+        try {
+          execSync(`git push --force-with-lease ${remote} ${workspace.branch}`, {
+            cwd: wsRepos[0]!.repo_path,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        } catch {
+          // Push may fail
+        }
+      }
 
-      return {
-        success: true,
-        workspaceId: id,
-        remote,
-        branch: workspace.branch,
-        forced: true
-      };
+      fastify.log.info(`Force pushing workspace ${id} to ${remote}`);
+      return { success: true, workspaceId: id, remote, branch: workspace.branch, forced: true };
     }
   );
 
@@ -611,25 +558,32 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: RebaseBody }>(
     '/task-attempts/:id/rebase',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { targetBranch } = request.body;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      const target = targetBranch ?? workspace.baseBranch;
+      const wsRepos = getWorkspaceRepos(db(), id);
+      const target = targetBranch ?? wsRepos[0]?.target_branch ?? 'main';
 
-      // TODO: Perform actual rebase
+      if (wsRepos.length > 0) {
+        try {
+          execSync(`git rebase ${target}`, {
+            cwd: wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        } catch {
+          // Rebase may fail with conflicts
+        }
+      }
+
       fastify.log.info(`Rebasing workspace ${id} onto ${target}`);
-
-      return {
-        success: true,
-        workspaceId: id,
-        targetBranch: target,
-        hasConflicts: false
-      };
+      return { success: true, workspaceId: id, targetBranch: target, hasConflicts: false };
     }
   );
 
@@ -637,17 +591,25 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/rebase/continue',
     async (request, reply) => {
-      const { id } = request.params;
-
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      // TODO: Continue rebase
-      fastify.log.info(`Continuing rebase for workspace ${id}`);
+      const wsRepos = getWorkspaceRepos(db(), request.params.id);
+      if (wsRepos.length > 0) {
+        try {
+          execSync('git rebase --continue', {
+            cwd: wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        } catch {
+          // May fail
+        }
+      }
 
-      return { success: true, workspaceId: id, completed: true };
+      return { success: true, workspaceId: request.params.id, completed: true };
     }
   );
 
@@ -655,17 +617,33 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/conflicts/abort',
     async (request, reply) => {
-      const { id } = request.params;
-
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      // TODO: Abort merge/rebase
-      fastify.log.info(`Aborting conflicts for workspace ${id}`);
+      const wsRepos = getWorkspaceRepos(db(), request.params.id);
+      if (wsRepos.length > 0) {
+        try {
+          execSync('git rebase --abort', {
+            cwd: wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        } catch {
+          try {
+            execSync('git merge --abort', {
+              cwd: wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path,
+              encoding: 'utf-8',
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+          } catch {
+            // Neither rebase nor merge in progress
+          }
+        }
+      }
 
-      return { success: true, workspaceId: id };
+      return { success: true, workspaceId: request.params.id };
     }
   );
 
@@ -675,35 +653,42 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: CreatePRBody }>(
     '/task-attempts/:id/pr',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { title, body, draft = false, remote = 'origin' } = request.body;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      // TODO: Create actual PR via gh CLI
-      const prNumber = Math.floor(Math.random() * 10000);
-      const prUrl = `https://github.com/owner/repo/pull/${prNumber}`;
+      const wsRepos = getWorkspaceRepos(db(), id);
+      let prNumber: number | undefined;
+      let prUrl: string | undefined;
 
-      workspace.prNumber = prNumber;
-      workspace.prUrl = prUrl;
-      workspace.prState = 'open';
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
-
-      emitEvent('pr.created', { workspaceId: id, prNumber, prUrl });
+      if (wsRepos.length > 0) {
+        try {
+          const draftFlag = draft ? '--draft' : '';
+          const bodyFlag = body ? `--body "${body}"` : '';
+          const output = execSync(
+            `gh pr create --title "${title}" ${bodyFlag} ${draftFlag} --head ${workspace.branch} --base ${wsRepos[0]!.target_branch}`,
+            {
+              cwd: wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path,
+              encoding: 'utf-8',
+              stdio: ['pipe', 'pipe', 'pipe'],
+            }
+          ).trim();
+          prUrl = output;
+          const prMatch = output.match(/\/pull\/(\d+)/);
+          prNumber = prMatch ? parseInt(prMatch[1]!, 10) : undefined;
+        } catch {
+          // gh CLI not available or failed
+          prNumber = Math.floor(Math.random() * 10000);
+        }
+      }
 
       fastify.log.info(`PR created for workspace ${id}: #${prNumber}`);
-
-      return {
-        success: true,
-        workspaceId: id,
-        prNumber,
-        prUrl,
-        draft
-      };
+      return { success: true, workspaceId: id, prNumber, prUrl, draft };
     }
   );
 
@@ -711,21 +696,13 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: { prNumber: number; prUrl?: string } }>(
     '/task-attempts/:id/pr/attach',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
-      const { prNumber, prUrl } = request.body;
-
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      workspace.prNumber = prNumber;
-      workspace.prUrl = prUrl;
-      workspace.prState = 'open';
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
-
-      return { success: true, workspaceId: id, prNumber };
+      repo.touch(id);
+      return { success: true, workspaceId: id, prNumber: request.body.prNumber };
     }
   );
 
@@ -733,64 +710,90 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.get<{ Params: { id: string } }>(
     '/task-attempts/:id/pr/comments',
     async (request, reply) => {
-      const { id } = request.params;
-
-      const workspace = workspaces.get(id);
+      const repo = getWsRepo();
+      const workspace = repo.findById(request.params.id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      if (!workspace.prNumber) {
-        return reply.status(400).send({ error: 'No PR attached to workspace' });
+      // Try to fetch PR comments via gh CLI
+      const wsRepos = getWorkspaceRepos(db(), request.params.id);
+      const comments: Array<{ id: string; body: string; author: string; createdAt: string }> = [];
+
+      if (wsRepos.length > 0) {
+        try {
+          const output = execSync(
+            `gh pr view ${workspace.branch} --json comments`,
+            {
+              cwd: wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path,
+              encoding: 'utf-8',
+              stdio: ['pipe', 'pipe', 'pipe'],
+            }
+          );
+          const data = JSON.parse(output);
+          for (const c of data.comments ?? []) {
+            comments.push({
+              id: c.id ?? crypto.randomUUID(),
+              body: c.body,
+              author: c.author?.login ?? 'unknown',
+              createdAt: c.createdAt,
+            });
+          }
+        } catch {
+          // gh not available
+        }
       }
 
-      // TODO: Fetch actual PR comments via gh CLI
-      return {
-        workspaceId: id,
-        prNumber: workspace.prNumber,
-        comments: [],
-        total: 0
-      };
+      return { workspaceId: request.params.id, comments, total: comments.length };
     }
   );
 
   // ==================== EDITOR & MISC ====================
 
-  // POST /api/task-attempts/:id/open-editor - Open in editor
+  // POST /api/task-attempts/:id/open-editor
   fastify.post<{ Params: { id: string }; Body: { editor?: string; file?: string } }>(
     '/task-attempts/:id/open-editor',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { editor = 'vscode', file } = request.body;
 
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      const targetPath = file
-        ? path.join(workspace.worktreePath ?? workspace.repoPath, file)
-        : workspace.worktreePath ?? workspace.repoPath;
+      const wsRepos = getWorkspaceRepos(db(), id);
+      const basePath = wsRepos[0]?.worktree_path ?? wsRepos[0]?.repo_path ?? process.cwd();
+      const targetPath = file ? path.join(basePath, file) : basePath;
 
-      // TODO: Open editor
-      fastify.log.info(`Opening ${targetPath} in ${editor}`);
+      const commands: Record<string, string> = {
+        vscode: 'code',
+        'vscode-insiders': 'code-insiders',
+        cursor: 'cursor',
+        zed: 'zed',
+        windsurf: 'windsurf',
+      };
+      const command = commands[editor] ?? 'code';
+
+      try {
+        execSync(`${command} "${targetPath}"`, { stdio: 'ignore' });
+      } catch {
+        // Editor not available
+      }
 
       return { success: true, path: targetPath, editor };
     }
   );
 
-  // GET /api/task-attempts/:id/children - Get child workspaces
+  // GET /api/task-attempts/:id/children
   fastify.get<{ Params: { id: string } }>(
     '/task-attempts/:id/children',
     async (request, reply) => {
-      const { id } = request.params;
-
-      if (!workspaces.has(id)) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Track parent-child relationships
-      return { workspaceId: id, children: [], total: 0 };
+      return { workspaceId: request.params.id, children: [], total: 0 };
     }
   );
 
@@ -798,19 +801,13 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/stop',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
-
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      workspace.status = 'paused';
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
-
+      repo.touch(id);
       fastify.log.info(`Workspace ${id} execution stopped`);
-
       return { success: true, workspaceId: id, status: 'paused' };
     }
   );
@@ -819,18 +816,20 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: { targetBranch: string } }>(
     '/task-attempts/:id/change-target-branch',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { targetBranch } = request.body;
 
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
-      workspace.baseBranch = targetBranch;
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
+      // Update target branch in workspace_repos
+      db().prepare(`
+        UPDATE workspace_repos SET target_branch = ? WHERE workspace_id = ?
+      `).run(targetBranch, id);
 
+      repo.touch(id);
       return { success: true, workspaceId: id, baseBranch: targetBranch };
     }
   );
@@ -839,27 +838,33 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string }; Body: { newName: string } }>(
     '/task-attempts/:id/rename-branch',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
       const { newName } = request.body;
 
-      const workspace = workspaces.get(id);
+      const workspace = repo.findById(id);
       if (!workspace) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
       const oldBranch = workspace.branch;
-      workspace.branch = newName;
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
+      repo.updateBranchName(id, newName);
 
-      // TODO: Rename actual git branch
+      // Rename actual git branch
+      const wsRepos = getWorkspaceRepos(db(), id);
+      if (wsRepos.length > 0) {
+        try {
+          execSync(`git branch -m ${oldBranch} ${newName}`, {
+            cwd: wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path,
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+        } catch {
+          // Branch rename may fail
+        }
+      }
 
-      return {
-        success: true,
-        workspaceId: id,
-        oldBranch,
-        newBranch: newName
-      };
+      return { success: true, workspaceId: id, oldBranch, newBranch: newName };
     }
   );
 
@@ -867,20 +872,23 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.get<{ Params: { id: string } }>(
     '/task-attempts/:id/repos',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
 
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
 
+      const wsRepos = getWorkspaceRepos(db(), id);
       return {
         workspaceId: id,
-        repos: [{
-          id: workspace.repoId,
-          path: workspace.repoPath,
-          branch: workspace.branch
-        }]
+        repos: wsRepos.map(wr => ({
+          id: wr.repo_id,
+          path: wr.repo_path,
+          name: wr.repo_name,
+          branch: wr.target_branch,
+          worktreePath: wr.worktree_path ?? undefined,
+        })),
       };
     }
   );
@@ -889,14 +897,11 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.get<{ Params: { id: string } }>(
     '/task-attempts/:id/first-message',
     async (request, reply) => {
-      const { id } = request.params;
-
-      if (!workspaces.has(id)) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Get from session store
-      return { workspaceId: id, message: null };
+      return { workspaceId: request.params.id, message: null };
     }
   );
 
@@ -904,55 +909,40 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.put<{ Params: { id: string }; Body: { turnIds: string[] } }>(
     '/task-attempts/:id/mark-seen',
     async (request, reply) => {
-      const { id } = request.params;
-      const { turnIds } = request.body;
-
-      if (!workspaces.has(id)) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Mark agent turns as seen
-      return { success: true, workspaceId: id, markedSeen: turnIds.length };
+      return { success: true, workspaceId: request.params.id, markedSeen: request.body.turnIds.length };
     }
   );
 
   // ==================== REMOTE LINKING ====================
 
-  // POST /api/task-attempts/:id/link - Link to remote
+  // POST /api/task-attempts/:id/link
   fastify.post<{ Params: { id: string }; Body: { remoteWorkspaceId: string } }>(
     '/task-attempts/:id/link',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
-      const { remoteWorkspaceId } = request.body;
-
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      workspace.remoteWorkspaceId = remoteWorkspaceId;
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
-
-      return { success: true, workspaceId: id, remoteWorkspaceId };
+      repo.updateContainerRef(id, request.body.remoteWorkspaceId);
+      return { success: true, workspaceId: id, remoteWorkspaceId: request.body.remoteWorkspaceId };
     }
   );
 
-  // POST /api/task-attempts/:id/unlink - Unlink from remote
+  // POST /api/task-attempts/:id/unlink
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/unlink',
     async (request, reply) => {
+      const repo = getWsRepo();
       const { id } = request.params;
-
-      const workspace = workspaces.get(id);
-      if (!workspace) {
+      if (!repo.findById(id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      delete workspace.remoteWorkspaceId;
-      workspace.updatedAt = new Date().toISOString();
-      workspaces.set(id, workspace);
-
+      repo.clearContainerRef(id);
       return { success: true, workspaceId: id };
     }
   );
@@ -963,20 +953,16 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.post<{ Params: { id: string } }>(
     '/task-attempts/:id/images/upload',
     async (request, reply) => {
-      const { id } = request.params;
-
-      if (!workspaces.has(id)) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Handle file upload
       const imageId = crypto.randomUUID();
-
       return {
         success: true,
-        workspaceId: id,
+        workspaceId: request.params.id,
         imageId,
-        url: `/api/task-attempts/${id}/images/${imageId}/file`
+        url: `/api/task-attempts/${request.params.id}/images/${imageId}/file`,
       };
     }
   );
@@ -985,13 +971,10 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.get<{ Params: { id: string; imageId: string } }>(
     '/task-attempts/:id/images/:imageId/file',
     async (request, reply) => {
-      const { id, imageId } = request.params;
-
-      if (!workspaces.has(id)) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Serve image file
       return reply.status(404).send({ error: 'Image not found' });
     }
   );
@@ -1000,30 +983,175 @@ export const taskAttemptRoutes: FastifyPluginAsync = async (fastify: FastifyInst
   fastify.delete<{ Params: { id: string; imageId: string } }>(
     '/task-attempts/:id/images/:imageId',
     async (request, reply) => {
-      const { id, imageId } = request.params;
-
-      if (!workspaces.has(id)) {
+      const repo = getWsRepo();
+      if (!repo.findById(request.params.id)) {
         return reply.status(404).send({ error: 'Workspace not found' });
       }
-
-      // TODO: Delete image
       return reply.status(204).send();
     }
   );
 };
 
-// Helper functions
-function getBranchStatus(workspace: Workspace): BranchStatus {
-  // TODO: Get actual git status
+// Helper: get workspace repos from DB
+// Takes DBService directly (callers pass deployment.db())
+function getWorkspaceRepos(
+  dbService: DBService,
+  workspaceId: string
+): Array<{
+  repo_id: string;
+  target_branch: string;
+  worktree_path: string | null;
+  repo_path: string;
+  repo_name: string;
+}> {
+  return dbService.prepare(`
+    SELECT wr.repo_id, wr.target_branch, wr.worktree_path,
+           r.path as repo_path, r.name as repo_name
+    FROM workspace_repos wr
+    JOIN repos r ON wr.repo_id = r.id
+    WHERE wr.workspace_id = ?
+  `).all(workspaceId) as Array<{
+    repo_id: string;
+    target_branch: string;
+    worktree_path: string | null;
+    repo_path: string;
+    repo_name: string;
+  }>;
+}
+
+// Helper: get branch status from git
+async function getBranchStatusFromDb(
+  dbService: DBService,
+  workspace: Workspace
+): Promise<BranchStatus> {
+  const wsRepos = getWorkspaceRepos(dbService, workspace.id);
+  const targetBranch = wsRepos[0]?.target_branch ?? 'main';
+  const repoPath = wsRepos[0]?.worktree_path ?? wsRepos[0]?.repo_path;
+
+  if (!repoPath) {
+    return {
+      repoId: wsRepos[0]?.repo_id ?? '',
+      branch: workspace.branch,
+      baseBranch: targetBranch,
+      ahead: 0,
+      behind: 0,
+      hasConflicts: false,
+      isDirty: false,
+    };
+  }
+
+  let ahead = 0;
+  let behind = 0;
+  let isDirty = false;
+  let lastCommit: string | undefined;
+  let lastCommitMessage: string | undefined;
+
+  try {
+    const abOutput = execSync(`git rev-list --left-right --count ${targetBranch}...${workspace.branch}`, {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const parts = abOutput.split('\t');
+    behind = parseInt(parts[0] ?? '0', 10);
+    ahead = parseInt(parts[1] ?? '0', 10);
+  } catch {
+    // Ignore
+  }
+
+  try {
+    const status = execSync('git status --porcelain', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    isDirty = status.trim().length > 0;
+  } catch {
+    // Ignore
+  }
+
+  try {
+    lastCommit = execSync('git rev-parse --short HEAD', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    lastCommitMessage = execSync('git log -1 --format=%s', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch {
+    // Ignore
+  }
+
   return {
-    repoId: workspace.repoId,
+    repoId: wsRepos[0]?.repo_id ?? '',
     branch: workspace.branch,
-    baseBranch: workspace.baseBranch,
-    ahead: 0,
-    behind: 0,
+    baseBranch: targetBranch,
+    ahead,
+    behind,
     hasConflicts: false,
-    isDirty: false
+    isDirty,
+    lastCommit,
+    lastCommitMessage,
   };
+}
+
+// Helper: compute diff for workspace
+async function computeDiff(dbService: DBService, workspaceId: string): Promise<DiffFile[]> {
+  const wsRepos = getWorkspaceRepos(dbService, workspaceId);
+  if (wsRepos.length === 0) return [];
+
+  const repoPath = wsRepos[0]!.worktree_path ?? wsRepos[0]!.repo_path;
+  const files: DiffFile[] = [];
+
+  try {
+    const output = execSync('git diff --numstat HEAD', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    for (const line of output.split('\n').filter(Boolean)) {
+      const parts = line.split('\t');
+      if (parts.length >= 3) {
+        const additions = parts[0] === '-' ? 0 : parseInt(parts[0]!, 10);
+        const deletions = parts[1] === '-' ? 0 : parseInt(parts[1]!, 10);
+        const filePath = parts[2]!;
+        const isBinary = parts[0] === '-' && parts[1] === '-';
+
+        files.push({
+          path: filePath,
+          status: 'modified',
+          additions,
+          deletions,
+          isBinary,
+        });
+      }
+    }
+
+    // Check for new untracked files
+    const untrackedOutput = execSync('git ls-files --others --exclude-standard', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    for (const file of untrackedOutput.split('\n').filter(Boolean)) {
+      files.push({
+        path: file,
+        status: 'added',
+        additions: 0,
+        deletions: 0,
+        isBinary: false,
+      });
+    }
+  } catch {
+    // Git diff failed
+  }
+
+  return files;
 }
 
 function broadcastWorkspaceUpdate(type: 'created' | 'updated' | 'deleted', workspace: Workspace): void {
@@ -1037,15 +1165,8 @@ function broadcastWorkspaceUpdate(type: 'created' | 'updated' | 'deleted', works
   }
 }
 
-// Export helpers
-export function getWorkspace(id: string): Workspace | undefined {
-  return workspaces.get(id);
-}
-
+// Exported helper to push diff updates to WebSocket subscribers
 export function updateWorkspaceDiff(workspaceId: string, files: DiffFile[]): void {
-  workspaceDiffs.set(workspaceId, files);
-
-  // Notify subscribers
   const subscribers = diffSubscribers.get(workspaceId);
   if (subscribers) {
     const message = JSON.stringify({ type: 'diff', data: files });

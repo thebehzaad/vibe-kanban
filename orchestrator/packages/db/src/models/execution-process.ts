@@ -310,6 +310,70 @@ export class ExecutionProcessRepository {
     return result.changes;
   }
 
+  // ==================== Repo States ====================
+
+  /**
+   * Find repo states for an execution process
+   * Translates the raw SQL that was in routes/execution-processes.ts
+   */
+  findRepoStates(executionProcessId: string): ExecutionProcessRepoStateWithRepo[] {
+    return this.db.database.prepare(`
+      SELECT eprs.id, eprs.execution_process_id, eprs.repo_id,
+             eprs.before_head_commit, eprs.after_head_commit, eprs.created_at,
+             r.path as repo_path, r.name as repo_name
+      FROM execution_process_repo_states eprs
+      LEFT JOIN repos r ON eprs.repo_id = r.id
+      WHERE eprs.execution_process_id = ?
+    `).all(executionProcessId) as ExecutionProcessRepoStateWithRepo[];
+  }
+
+  // ==================== Logs ====================
+
+  /**
+   * Find logs for an execution process
+   * Translates the raw SQL that was in routes/execution-processes.ts
+   */
+  findLogs(executionProcessId: string): ExecutionProcessLog[] {
+    return this.db.database.prepare(`
+      SELECT id, execution_process_id, log_type, content, sequence, created_at
+      FROM execution_process_logs
+      WHERE execution_process_id = ?
+      ORDER BY sequence ASC
+    `).all(executionProcessId) as ExecutionProcessLog[];
+  }
+
+  /**
+   * Add a log entry for an execution process
+   */
+  addLog(executionProcessId: string, logType: string, content: string): string {
+    const seqRow = this.db.database.prepare(
+      'SELECT COALESCE(MAX(sequence), 0) + 1 as next_seq FROM execution_process_logs WHERE execution_process_id = ?'
+    ).get(executionProcessId) as { next_seq: number };
+
+    const id = crypto.randomUUID();
+    this.db.database.prepare(`
+      INSERT INTO execution_process_logs (id, execution_process_id, log_type, content, sequence, created_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+    `).run(id, executionProcessId, logType, content, seqRow.next_seq);
+
+    return id;
+  }
+
+  // ==================== Coding Agent Turns ====================
+
+  /**
+   * Find coding agent turns for an execution process
+   * Translates the raw SQL that was in routes/execution-processes.ts
+   */
+  findCodingAgentTurns(executionProcessId: string): CodingAgentTurn[] {
+    return this.db.database.prepare(`
+      SELECT id, execution_process_id, turn_number, prompt, response, tool_calls, created_at
+      FROM coding_agent_turns
+      WHERE execution_process_id = ?
+      ORDER BY turn_number ASC
+    `).all(executionProcessId) as CodingAgentTurn[];
+  }
+
   /**
    * Find workspaces with running dev servers
    */
@@ -324,4 +388,36 @@ export class ExecutionProcessRepository {
 
     return new Set(rows.map(r => r.workspace_id));
   }
+}
+
+// Additional types for query results
+
+export interface ExecutionProcessRepoStateWithRepo {
+  id: string;
+  execution_process_id: string;
+  repo_id: string;
+  before_head_commit: string | null;
+  after_head_commit: string | null;
+  created_at: string;
+  repo_path: string | null;
+  repo_name: string | null;
+}
+
+export interface ExecutionProcessLog {
+  id: string;
+  execution_process_id: string;
+  log_type: string;
+  content: string;
+  sequence: number;
+  created_at: string;
+}
+
+export interface CodingAgentTurn {
+  id: string;
+  execution_process_id: string;
+  turn_number: number;
+  prompt: string | null;
+  response: string | null;
+  tool_calls: string | null;
+  created_at: string;
 }

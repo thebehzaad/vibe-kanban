@@ -6,7 +6,7 @@
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import { execSync } from 'node:child_process';
 import * as path from 'node:path';
-import { getRepository } from './repos.js';
+import { RepoRepository } from '@orchestrator/db';
 
 // Types
 export interface SearchResult {
@@ -33,6 +33,9 @@ const MAX_RESULTS = 1000;
 const MAX_CONTENT_LENGTH = 500;
 
 export const searchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new RepoRepository(db());
+
   // GET /api/search - Search across multiple repositories
   fastify.get<{
     Querystring: {
@@ -70,10 +73,10 @@ export const searchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance)
       return reply.status(400).send({ error: 'At least one repository ID is required' });
     }
 
-    // Get repositories
-    const repos = repoIdList
-      .map(id => ({ id, repo: getRepository(id) }))
-      .filter((r): r is { id: string; repo: NonNullable<ReturnType<typeof getRepository>> } => r.repo !== undefined);
+    // Get repositories from DB
+    const repoRepository = getRepo();
+    const foundRepos = repoRepository.findByIds(repoIdList);
+    const repos = foundRepos.map(r => ({ id: r.id, repo: r }));
 
     if (repos.length === 0) {
       return reply.status(404).send({ error: 'No valid repositories found' });

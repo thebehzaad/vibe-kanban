@@ -1,12 +1,20 @@
 /**
  * Fastify app setup
  * Translates: crates/server/src/main.rs, crates/server/src/lib.rs
+ *
+ * In Rust, the server creates a DeploymentImpl and passes it as
+ * Axum router state via `.with_state(deployment)`. Routes then
+ * access it via `State(deployment): State<DeploymentImpl>`.
+ *
+ * In TypeScript, we mirror this by decorating Fastify with the
+ * deployment instance, accessible as `fastify.deployment` in all routes.
  */
 
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import multipart from '@fastify/multipart';
+import type { Deployment } from '@orchestrator/deployment';
 
 // Import all route plugins
 import { healthRoutes } from './routes/health.js';
@@ -34,6 +42,7 @@ export interface ServerConfig {
   host?: string;
   logger?: boolean;
   imagesDir?: string;
+  deployment: Deployment;
 }
 
 export async function createApp(config: ServerConfig): Promise<FastifyInstance> {
@@ -60,6 +69,9 @@ export async function createApp(config: ServerConfig): Promise<FastifyInstance> 
 
   // Decorate app with config values
   app.decorate('imagesDir', config.imagesDir ?? './images');
+
+  // Decorate app with deployment (mirrors Rust's `.with_state(deployment)`)
+  app.decorate('deployment', config.deployment);
 
   // ========================================
   // Core routes
@@ -162,8 +174,10 @@ export async function startServer(config: ServerConfig): Promise<FastifyInstance
 }
 
 // Type augmentation for Fastify
+// Mirrors Rust's `State(deployment): State<DeploymentImpl>`
 declare module 'fastify' {
   interface FastifyInstance {
     imagesDir: string;
+    deployment: Deployment;
   }
 }

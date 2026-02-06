@@ -1,49 +1,24 @@
 /**
  * Containers routes
  * Translates: crates/server/src/routes/containers.rs
+ *
+ * In local deployment, "containers" are git worktrees mapped via workspaces.
+ * This route resolves container_ref strings to workspace/task/project info.
+ *
+ * Rust pattern: State(deployment) → deployment.container() / deployment.db()
+ * TS pattern:   fastify.deployment → deployment.db() → new WorkspaceRepository(db)
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import { WorkspaceRepository } from '@orchestrator/db';
 
-// Types
-export interface ContainerInfo {
-  containerId: string;
-  projectId: string;
-  taskId?: string;
-  attemptId?: string;
-  status: 'running' | 'stopped' | 'creating' | 'error';
-  createdAt: string;
-}
-
-export interface WorkspaceContext {
-  workspaceId: string;
-  projectId: string;
-  taskId?: string;
-  attemptId?: string;
-  repoPath: string;
-  branch: string;
-  baseBranch: string;
-  worktreePath?: string;
-}
-
-// Container reference format: project_id:task_id:attempt_id or just workspace_id
-function parseContainerRef(ref: string): { projectId?: string; taskId?: string; attemptId?: string; workspaceId?: string } {
-  const parts = ref.split(':');
-  if (parts.length === 3) {
-    return {
-      projectId: parts[0],
-      taskId: parts[1],
-      attemptId: parts[2]
-    };
-  }
-  return { workspaceId: ref };
-}
-
-// In-memory stores
-const containers = new Map<string, ContainerInfo>();
-const workspaceContexts = new Map<string, WorkspaceContext>();
+// Re-export DB types for consumers
+export type { ContainerInfo } from '@orchestrator/db';
 
 export const containerRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new WorkspaceRepository(db());
+
   // GET /api/containers/info - Get container info by reference
   fastify.get<{ Querystring: { ref: string } }>('/containers/info', async (request, reply) => {
     const { ref } = request.query;
@@ -52,31 +27,30 @@ export const containerRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       return reply.status(400).send({ error: 'Container reference required' });
     }
 
-    const parsed = parseContainerRef(ref);
+    const repo = getRepo();
+    const info = repo.resolveContainerRef(ref);
 
-    // Look up container by workspace ID or composite key
-    let container: ContainerInfo | undefined;
-
-    if (parsed.workspaceId) {
-      container = containers.get(parsed.workspaceId);
-    } else if (parsed.projectId && parsed.taskId && parsed.attemptId) {
-      const key = `${parsed.projectId}:${parsed.taskId}:${parsed.attemptId}`;
-      container = containers.get(key);
-    }
-
-    if (!container) {
-      // Return minimal info if container not found but reference is valid
+    if (!info) {
       return {
         ref,
-        ...parsed,
-        status: 'not_found'
+        status: 'not_found',
       };
     }
 
-    return container;
+    const workspace = repo.findByIdWithStatus(info.workspaceId);
+
+    return {
+      ref,
+      workspaceId: info.workspaceId,
+      taskId: info.taskId,
+      projectId: info.projectId,
+      status: workspace?.isRunning ? 'running' : 'stopped',
+      archived: workspace?.archived ?? false,
+      branch: workspace?.branch,
+    };
   });
 
-  // GET /api/containers/attempt-context - Get workspace context
+  // GET /api/containers/attempt-context - Get workspace context for container
   fastify.get<{ Querystring: { ref: string } }>(
     '/containers/attempt-context',
     async (request, reply) => {
@@ -86,36 +60,47 @@ export const containerRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         return reply.status(400).send({ error: 'Container reference required' });
       }
 
-      const parsed = parseContainerRef(ref);
-      const workspaceId = parsed.workspaceId ?? `${parsed.projectId}:${parsed.taskId}:${parsed.attemptId}`;
+      const repo = getRepo();
+      const info = repo.resolveContainerRef(ref);
 
-      const context = workspaceContexts.get(workspaceId);
-
-      if (!context) {
+      if (!info) {
         return reply.status(404).send({ error: 'Workspace context not found' });
       }
 
-      return context;
+      const workspace = repo.findById(info.workspaceId);
+      if (!workspace) {
+        return reply.status(404).send({ error: 'Workspace not found' });
+      }
+
+      // Get workspace repos from DB
+      const workspaceRepos = db().prepare(`
+        SELECT wr.repo_id, wr.target_branch, wr.worktree_path,
+               r.path as repo_path, r.name as repo_name
+        FROM workspace_repos wr
+        JOIN repos r ON wr.repo_id = r.id
+        WHERE wr.workspace_id = ?
+      `).all(info.workspaceId) as Array<{
+        repo_id: string;
+        target_branch: string;
+        worktree_path: string | null;
+        repo_path: string;
+        repo_name: string;
+      }>;
+
+      return {
+        workspaceId: info.workspaceId,
+        taskId: info.taskId,
+        projectId: info.projectId,
+        branch: workspace.branch,
+        agentWorkingDir: workspace.agentWorkingDir,
+        repos: workspaceRepos.map(wr => ({
+          repoId: wr.repo_id,
+          repoPath: wr.repo_path,
+          repoName: wr.repo_name,
+          targetBranch: wr.target_branch,
+          worktreePath: wr.worktree_path ?? undefined,
+        })),
+      };
     }
   );
 };
-
-// Helper functions for managing containers
-export function registerContainer(info: ContainerInfo): void {
-  const key = info.attemptId
-    ? `${info.projectId}:${info.taskId}:${info.attemptId}`
-    : info.containerId;
-  containers.set(key, info);
-}
-
-export function registerWorkspaceContext(context: WorkspaceContext): void {
-  workspaceContexts.set(context.workspaceId, context);
-}
-
-export function getContainer(ref: string): ContainerInfo | undefined {
-  return containers.get(ref);
-}
-
-export function getWorkspaceContext(workspaceId: string): WorkspaceContext | undefined {
-  return workspaceContexts.get(workspaceId);
-}

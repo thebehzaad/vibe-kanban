@@ -4,28 +4,13 @@
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import * as crypto from 'node:crypto';
+import { ScratchRepository, type ScratchType, type ScratchItem } from '@orchestrator/db';
+import type { Deployment } from '@orchestrator/deployment';
 
-// Types
-export type ScratchType =
-  | 'note'
-  | 'snippet'
-  | 'todo'
-  | 'bookmark'
-  | 'preference'
-  | 'ui_state'
-  | 'custom';
+// Re-export types for consumers that import from routes
+export type { ScratchType, ScratchItem } from '@orchestrator/db';
 
-export interface ScratchItem {
-  id: string;
-  type: ScratchType;
-  key: string;
-  value: unknown;
-  metadata?: Record<string, unknown>;
-  createdAt: string;
-  updatedAt: string;
-}
-
+// Body types for request validation
 export interface CreateScratchBody {
   value: unknown;
   metadata?: Record<string, unknown>;
@@ -36,33 +21,22 @@ export interface UpdateScratchBody {
   metadata?: Record<string, unknown>;
 }
 
-// In-memory store: type -> key -> item
-const scratchStore = new Map<string, Map<string, ScratchItem>>();
-
 // WebSocket subscribers for change streaming
-const scratchSubscribers = new Map<string, Set<any>>(); // "type:id" -> sockets
+const scratchSubscribers = new Map<string, Set<any>>(); // "type:key" -> sockets
 
-function getScratchKey(type: string, id: string): string {
-  return `${type}:${id}`;
+function getScratchKey(type: string, key: string): string {
+  return `${type}:${key}`;
 }
 
 export const scratchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new ScratchRepository(db());
+
   // GET /api/scratch - List all scratch items
   fastify.get<{ Querystring: { type?: ScratchType } }>('/scratch', async (request) => {
     const { type } = request.query;
-
-    const items: ScratchItem[] = [];
-
-    if (type) {
-      const typeStore = scratchStore.get(type);
-      if (typeStore) {
-        items.push(...typeStore.values());
-      }
-    } else {
-      for (const typeStore of scratchStore.values()) {
-        items.push(...typeStore.values());
-      }
-    }
+    const repo = getRepo();
+    const items = repo.findAll(type);
 
     return {
       items,
@@ -75,9 +49,8 @@ export const scratchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance
     '/scratch/:scratch_type/:id',
     async (request, reply) => {
       const { scratch_type, id } = request.params;
-
-      const typeStore = scratchStore.get(scratch_type);
-      const item = typeStore?.get(id);
+      const repo = getRepo();
+      const item = repo.findByTypeAndKey(scratch_type, id);
 
       if (!item) {
         return reply.status(404).send({ error: 'Scratch item not found' });
@@ -93,30 +66,17 @@ export const scratchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance
     async (request, reply) => {
       const { scratch_type, id } = request.params;
       const { value, metadata } = request.body;
-
-      let typeStore = scratchStore.get(scratch_type);
-      if (!typeStore) {
-        typeStore = new Map();
-        scratchStore.set(scratch_type, typeStore);
-      }
+      const repo = getRepo();
 
       // Check if already exists
-      if (typeStore.has(id)) {
+      const existing = repo.findByTypeAndKey(scratch_type, id);
+      if (existing) {
         return reply.status(409).send({ error: 'Scratch item already exists' });
       }
 
-      const now = new Date().toISOString();
-      const item: ScratchItem = {
-        id,
-        type: scratch_type as ScratchType,
-        key: id,
-        value,
-        metadata,
-        createdAt: now,
-        updatedAt: now
-      };
-
-      typeStore.set(id, item);
+      const item = repo.create(
+        { type: scratch_type as ScratchType, key: id, value, metadata },
+      );
 
       // Notify subscribers
       notifyScratchChange(scratch_type, id, 'created', item);
@@ -133,46 +93,23 @@ export const scratchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance
     async (request, reply) => {
       const { scratch_type, id } = request.params;
       const { value, metadata } = request.body;
+      const repo = getRepo();
 
-      const typeStore = scratchStore.get(scratch_type);
-      const existingItem = typeStore?.get(id);
+      const existing = repo.findByTypeAndKey(scratch_type, id);
 
-      const now = new Date().toISOString();
-
-      if (existingItem) {
+      if (existing) {
         // Update existing
-        const updatedItem: ScratchItem = {
-          ...existingItem,
-          value,
-          metadata: metadata ?? existingItem.metadata,
-          updatedAt: now
-        };
-
-        typeStore!.set(id, updatedItem);
+        const updatedItem = repo.update(scratch_type, id, { value, metadata });
 
         // Notify subscribers
-        notifyScratchChange(scratch_type, id, 'updated', updatedItem);
+        notifyScratchChange(scratch_type, id, 'updated', updatedItem!);
 
         return updatedItem;
       } else {
         // Create new (upsert behavior)
-        let store = typeStore;
-        if (!store) {
-          store = new Map();
-          scratchStore.set(scratch_type, store);
-        }
-
-        const newItem: ScratchItem = {
-          id,
-          type: scratch_type as ScratchType,
-          key: id,
-          value,
-          metadata,
-          createdAt: now,
-          updatedAt: now
-        };
-
-        store.set(id, newItem);
+        const newItem = repo.create(
+          { type: scratch_type as ScratchType, key: id, value, metadata },
+        );
 
         // Notify subscribers
         notifyScratchChange(scratch_type, id, 'created', newItem);
@@ -187,13 +124,12 @@ export const scratchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance
     '/scratch/:scratch_type/:id',
     async (request, reply) => {
       const { scratch_type, id } = request.params;
+      const repo = getRepo();
 
-      const typeStore = scratchStore.get(scratch_type);
-      if (!typeStore?.has(id)) {
+      const changes = repo.delete(scratch_type, id);
+      if (changes === 0) {
         return reply.status(404).send({ error: 'Scratch item not found' });
       }
-
-      typeStore.delete(id);
 
       // Notify subscribers
       notifyScratchChange(scratch_type, id, 'deleted', null);
@@ -220,9 +156,9 @@ export const scratchRoutes: FastifyPluginAsync = async (fastify: FastifyInstance
 
       fastify.log.info(`Scratch WebSocket connected: ${key}`);
 
-      // Send current value
-      const typeStore = scratchStore.get(scratch_type);
-      const item = typeStore?.get(id);
+      // Send current value from DB
+      const repo = getRepo();
+      const item = repo.findByTypeAndKey(scratch_type, id);
       if (item) {
         socket.send(JSON.stringify({ type: 'initial', data: item }));
       }
@@ -257,33 +193,19 @@ function notifyScratchChange(
   }
 }
 
-// Export helpers
-export function getScratchItem(type: string, id: string): ScratchItem | undefined {
-  return scratchStore.get(type)?.get(id);
+// Export helpers that accept a Deployment parameter (mirrors Rust pattern)
+export function getScratchItem(deployment: Deployment, type: string, key: string): ScratchItem | undefined {
+  const repo = new ScratchRepository(deployment.db());
+  return repo.findByTypeAndKey(type, key);
 }
 
-export function setScratchItem(type: string, id: string, value: unknown, metadata?: Record<string, unknown>): ScratchItem {
-  let typeStore = scratchStore.get(type);
-  if (!typeStore) {
-    typeStore = new Map();
-    scratchStore.set(type, typeStore);
-  }
-
-  const existing = typeStore.get(id);
-  const now = new Date().toISOString();
-
-  const item: ScratchItem = {
-    id,
-    type: type as ScratchType,
-    key: id,
-    value,
-    metadata,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now
-  };
-
-  typeStore.set(id, item);
-  notifyScratchChange(type, id, existing ? 'updated' : 'created', item);
-
-  return item;
+export function setScratchItem(
+  deployment: Deployment,
+  type: string,
+  key: string,
+  value: unknown,
+  metadata?: Record<string, unknown>
+): ScratchItem {
+  const repo = new ScratchRepository(deployment.db());
+  return repo.upsert(type, key, value, metadata);
 }

@@ -39,6 +39,7 @@ export {
   type ContainerInfo,
   type CreateWorkspace,
   type UpdateWorkspace,
+  type WorkspaceRepoInfo,
   WorkspaceRepository
 } from './workspace.js';
 
@@ -57,6 +58,9 @@ export {
   type CreateExecutionProcess,
   type CreateExecutionProcessRepoState,
   type ExecutionProcessRepoState,
+  type ExecutionProcessRepoStateWithRepo,
+  type ExecutionProcessLog,
+  type CodingAgentTurn,
   type LatestProcessInfo,
   ExecutionProcessRepository
 } from './execution-process.js';

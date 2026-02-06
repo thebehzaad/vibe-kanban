@@ -364,4 +364,54 @@ export class WorkspaceRepository {
     ).run(id);
     return result.changes;
   }
+
+  // ==================== Workspace Repos ====================
+
+  /**
+   * Create a workspace-repo link
+   * Translates: WorkspaceRepo::create in Rust
+   */
+  createWorkspaceRepo(
+    workspaceId: string,
+    repoId: string,
+    targetBranch: string,
+    worktreePath?: string,
+  ): void {
+    const id = crypto.randomUUID();
+    this.db.database.prepare(`
+      INSERT INTO workspace_repos (id, workspace_id, repo_id, target_branch, worktree_path, created_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))
+    `).run(id, workspaceId, repoId, targetBranch, worktreePath ?? null);
+  }
+
+  /**
+   * Get workspace repos with joined repo info
+   * Translates: WorkspaceRepo::find_by_workspace_id in Rust
+   */
+  getWorkspaceRepos(workspaceId: string): WorkspaceRepoInfo[] {
+    return this.db.database.prepare(`
+      SELECT wr.repo_id, wr.target_branch, wr.worktree_path,
+             r.path as repo_path, r.name as repo_name
+      FROM workspace_repos wr
+      JOIN repos r ON wr.repo_id = r.id
+      WHERE wr.workspace_id = ?
+    `).all(workspaceId) as WorkspaceRepoInfo[];
+  }
+
+  /**
+   * Update target branch for all workspace repos
+   */
+  updateTargetBranch(workspaceId: string, targetBranch: string): void {
+    this.db.database.prepare(`
+      UPDATE workspace_repos SET target_branch = ? WHERE workspace_id = ?
+    `).run(targetBranch, workspaceId);
+  }
+}
+
+export interface WorkspaceRepoInfo {
+  repo_id: string;
+  target_branch: string;
+  worktree_path: string | null;
+  repo_path: string;
+  repo_name: string;
 }

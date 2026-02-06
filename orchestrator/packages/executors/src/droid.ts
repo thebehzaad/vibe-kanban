@@ -1,6 +1,8 @@
 /**
- * Google Gemini CLI executor
- * Translates: crates/executors/src/executors/gemini.rs
+ * Droid agent executor
+ * Translates: crates/executors/src/executors/droid.rs
+ *
+ * Supports session forking via --fork flag for parallel execution.
  */
 
 import { BaseExecutor } from './base.js';
@@ -10,43 +12,50 @@ import type {
   ExecutorType, NormalizeResult, SpawnedChild,
 } from './types.js';
 
-export interface GeminiConfig extends ExecutorConfig {
-  type: 'gemini';
-  apiKey?: string;
-  model?: string; // defaults to gemini-2.5-pro
+export interface DroidConfig extends ExecutorConfig {
+  type: 'droid';
 }
 
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-pro';
-
-export class GeminiExecutor extends BaseExecutor {
+export class DroidExecutor extends BaseExecutor {
   private sessions = new Map<string, ExecutorSession>();
-  constructor(config: GeminiConfig) { super(config); }
-  get name(): string { return 'Gemini'; }
-  get type(): ExecutorType { return 'gemini'; }
-  private get geminiConfig(): GeminiConfig { return this.config as GeminiConfig; }
+  constructor(config: DroidConfig) { super(config); }
+  get name(): string { return 'Droid'; }
+  get type(): ExecutorType { return 'droid'; }
+  private get droidConfig(): DroidConfig { return this.config as DroidConfig; }
 
   async resolveCommand(): Promise<{ command: string; args: string[] } | undefined> {
-    const geminiPath = which('gemini');
-    if (geminiPath) {
-      return { command: geminiPath, args: [] };
+    const droidPath = which('droid');
+    if (droidPath) {
+      return { command: droidPath, args: [] };
     }
 
     return undefined;
   }
 
-  /** Build command-line arguments for gemini */
-  buildArgs(request: ExecutionRequest): string[] {
+  /** Build command-line arguments for droid */
+  buildArgs(request: ExecutionRequest, sessionId?: string, fork?: boolean): string[] {
     const args: string[] = [];
 
-    const model = this.geminiConfig.model ?? DEFAULT_GEMINI_MODEL;
-    args.push('--model', model);
+    if (this.droidConfig.model) {
+      args.push('--model', this.droidConfig.model);
+    }
+
+    // Session resumption
+    if (sessionId) {
+      args.push('--session', sessionId);
+    }
+
+    // Session forking for parallel execution
+    if (fork) {
+      args.push('--fork');
+    }
 
     args.push('--prompt', request.prompt);
 
     return args;
   }
 
-  /** Spawn Gemini as a child process */
+  /** Spawn Droid as a child process */
   async spawn(request: ExecutionRequest, msgStore: MsgStore): Promise<SpawnedChild | undefined> {
     const resolved = await this.resolveCommand();
     if (!resolved) return undefined;
@@ -54,9 +63,6 @@ export class GeminiExecutor extends BaseExecutor {
     const args = [...resolved.args, ...this.buildArgs(request)];
 
     const env: Record<string, string> = { ...process.env as Record<string, string> };
-    if (this.geminiConfig.apiKey) {
-      env.GEMINI_API_KEY = this.geminiConfig.apiKey;
-    }
     if (request.env) {
       Object.assign(env, request.env);
     }
@@ -68,18 +74,48 @@ export class GeminiExecutor extends BaseExecutor {
     });
   }
 
+  /** Spawn a follow-up with session resumption */
+  async spawnFollowUp(
+    request: ExecutionRequest,
+    sessionId: string,
+    msgStore: MsgStore,
+    fork?: boolean,
+  ): Promise<SpawnedChild | undefined> {
+    const resolved = await this.resolveCommand();
+    if (!resolved) return undefined;
+
+    const args = [...resolved.args, ...this.buildArgs(request, sessionId, fork)];
+
+    const env: Record<string, string> = { ...process.env as Record<string, string> };
+    if (request.env) {
+      Object.assign(env, request.env);
+    }
+
+    return this.spawnProcess(resolved.command, args, {
+      msgStore,
+      cwd: request.workingDir,
+      env,
+    });
+  }
+
+  /** Fork a session for parallel execution */
+  async forkSession(
+    sessionId: string,
+    request: ExecutionRequest,
+    msgStore: MsgStore,
+  ): Promise<SpawnedChild | undefined> {
+    return this.spawnFollowUp(request, sessionId, msgStore, true);
+  }
+
   async execute(request: ExecutionRequest): Promise<ExecutionResult> {
     const resolved = await this.resolveCommand();
     if (!resolved) {
-      return { success: false, output: '', error: 'Gemini CLI not found' };
+      return { success: false, output: '', error: 'Droid CLI not found' };
     }
 
     const args = [...resolved.args, ...this.buildArgs(request)];
 
     const env: Record<string, string> = { ...process.env as Record<string, string> };
-    if (this.geminiConfig.apiKey) {
-      env.GEMINI_API_KEY = this.geminiConfig.apiKey;
-    }
     if (request.env) {
       Object.assign(env, request.env);
     }
@@ -100,7 +136,7 @@ export class GeminiExecutor extends BaseExecutor {
   async createSession(): Promise<ExecutorSession> {
     const session: ExecutorSession = {
       id: crypto.randomUUID(),
-      executorType: 'gemini',
+      executorType: 'droid',
       messages: [],
       createdAt: new Date(),
     };
@@ -109,7 +145,7 @@ export class GeminiExecutor extends BaseExecutor {
   }
 
   async continueSession(sessionId: string, request: ExecutionRequest): Promise<ExecutionResult> {
-    return this.execute(request);
+    return this.execute({ ...request, options: { ...request.options, sessionId } });
   }
 
   async cancelExecution(sessionId: string): Promise<void> {

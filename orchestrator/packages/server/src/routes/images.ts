@@ -1,25 +1,21 @@
 /**
  * Images routes
  * Translates: crates/server/src/routes/images.rs
+ *
+ * Rust pattern: State(deployment) → deployment.image() → ImageService methods
+ * TS pattern:   fastify.deployment → deployment.db() → new ImageRepository(db)
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { ImageRepository } from '@orchestrator/db';
+
+// Re-export DB types for consumers
+export type { Image } from '@orchestrator/db';
 
 // Types
-export interface Image {
-  id: string;
-  filename: string;
-  mimeType: string;
-  size: number;
-  taskId?: string;
-  workspaceId?: string;
-  path: string;
-  createdAt: string;
-}
-
 export interface ImageMetadata {
   id: string;
   filename: string;
@@ -39,9 +35,6 @@ const ALLOWED_MIME_TYPES = [
   'image/svg+xml'
 ];
 
-// In-memory store (replace with database)
-const images = new Map<string, Image>();
-
 // Get images directory
 function getImagesDir(): string {
   return process.env['ORCHESTRATOR_IMAGES_DIR'] ?? path.join(process.cwd(), 'data', 'images');
@@ -51,6 +44,9 @@ export const imageRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
   // Ensure images directory exists
   const imagesDir = getImagesDir();
   await fs.mkdir(imagesDir, { recursive: true });
+
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new ImageRepository(db());
 
   // POST /api/images/upload - Upload image (multipart)
   fastify.post('/images/upload', async (request, reply) => {
@@ -94,32 +90,30 @@ export const imageRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
     // Write file
     await fs.writeFile(filePath, buffer);
 
-    const image: Image = {
-      id,
+    const repo = getRepo();
+    const image = repo.create({
       filename,
       mimeType: mimetype,
       size: buffer.length,
-      path: filePath,
-      createdAt: new Date().toISOString()
-    };
+      path: filePath
+    }, id);
 
-    images.set(id, image);
-
-    fastify.log.info(`Image uploaded: ${id} (${filename}, ${buffer.length} bytes)`);
+    fastify.log.info(`Image uploaded: ${image.id} (${filename}, ${buffer.length} bytes)`);
 
     return {
-      id,
+      id: image.id,
       filename,
       mimeType: mimetype,
       size: buffer.length,
-      url: `/api/images/${id}/file`
+      url: `/api/images/${image.id}/file`
     };
   });
 
   // GET /api/images/:id/file - Serve image
   fastify.get<{ Params: { id: string } }>('/images/:id/file', async (request, reply) => {
     const { id } = request.params;
-    const image = images.get(id);
+    const repo = getRepo();
+    const image = repo.findById(id);
 
     if (!image) {
       return reply.status(404).send({ error: 'Image not found' });
@@ -140,7 +134,8 @@ export const imageRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
   // DELETE /api/images/:id - Delete image
   fastify.delete<{ Params: { id: string } }>('/images/:id', async (request, reply) => {
     const { id } = request.params;
-    const image = images.get(id);
+    const repo = getRepo();
+    const image = repo.findById(id);
 
     if (!image) {
       return reply.status(404).send({ error: 'Image not found' });
@@ -153,7 +148,7 @@ export const imageRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
       // File may already be deleted
     }
 
-    images.delete(id);
+    repo.delete(id);
 
     fastify.log.info(`Image deleted: ${id}`);
 
@@ -163,9 +158,8 @@ export const imageRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
   // GET /api/images/task/:taskId - Get images for task
   fastify.get<{ Params: { taskId: string } }>('/images/task/:taskId', async (request) => {
     const { taskId } = request.params;
-
-    const taskImages = Array.from(images.values())
-      .filter(img => img.taskId === taskId);
+    const repo = getRepo();
+    const taskImages = repo.findByTaskId(taskId);
 
     return {
       taskId,
@@ -189,8 +183,9 @@ export const imageRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
       const { path: imagePath } = request.query;
 
       // Find image by task ID and path
-      const image = Array.from(images.values())
-        .find(img => img.taskId === taskId && img.filename === imagePath);
+      const repo = getRepo();
+      const taskImages = repo.findByTaskId(taskId);
+      const image = taskImages.find(img => img.filename === imagePath);
 
       if (!image) {
         return reply.status(404).send({ error: 'Image not found' });
@@ -253,27 +248,24 @@ export const imageRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) 
       // Write file
       await fs.writeFile(filePath, buffer);
 
-      const image: Image = {
-        id,
+      const repo = getRepo();
+      const image = repo.create({
+        taskId,
         filename,
         mimeType: mimetype,
         size: buffer.length,
-        taskId,
-        path: filePath,
-        createdAt: new Date().toISOString()
-      };
+        path: filePath
+      }, id);
 
-      images.set(id, image);
-
-      fastify.log.info(`Image uploaded for task ${taskId}: ${id} (${filename})`);
+      fastify.log.info(`Image uploaded for task ${taskId}: ${image.id} (${filename})`);
 
       return {
-        id,
+        id: image.id,
         taskId,
         filename,
         mimeType: mimetype,
         size: buffer.length,
-        url: `/api/images/${id}/file`
+        url: `/api/images/${image.id}/file`
       };
     }
   );
@@ -289,13 +281,4 @@ function getExtensionFromMime(mimeType: string): string {
     'image/svg+xml': '.svg'
   };
   return extensions[mimeType] ?? '.bin';
-}
-
-// Export helpers
-export function getImage(id: string): Image | undefined {
-  return images.get(id);
-}
-
-export function storeImage(image: Image): void {
-  images.set(image.id, image);
 }

@@ -1,26 +1,20 @@
 /**
  * Repository routes
  * Translates: crates/server/src/routes/repo.rs
+ *
+ * Rust pattern: State(deployment) → deployment.db().pool / deployment.repo()
+ * TS pattern:   fastify.deployment → deployment.db() → new RepoRepository(db)
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
+import { RepoRepository, type UpdateRepo } from '@orchestrator/db';
+
+// Re-export DB types for consumers (Repo aliased as Repository for route-level API)
+export type { Repo as Repository } from '@orchestrator/db';
 
 // Types
-export interface Repository {
-  id: string;
-  name: string;
-  path: string;
-  remote?: string;
-  defaultBranch: string;
-  defaultTargetBranch?: string;
-  defaultWorkingDir?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface Branch {
   name: string;
   commit: string;
@@ -68,15 +62,17 @@ export interface InitRepoBody {
   remote?: string;
 }
 
-// In-memory store
-const repositories = new Map<string, Repository>();
-
 export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new RepoRepository(db());
+
   // GET /api/repos - List all repositories
   fastify.get('/repos', async () => {
+    const repo = getRepo();
+    const repositories = repo.listAll();
     return {
-      repositories: Array.from(repositories.values()),
-      total: repositories.size
+      repositories,
+      total: repositories.length
     };
   });
 
@@ -90,26 +86,26 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
       return reply.status(400).send({ error: 'Path is not a git repository' });
     }
 
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
+    const resolvedPath = path.resolve(repoPath);
+    const displayName = name ?? path.basename(resolvedPath);
 
-    const repo: Repository = {
-      id,
-      name: name ?? path.basename(repoPath),
-      path: path.resolve(repoPath),
-      remote: gitInfo.remote,
-      defaultBranch: gitInfo.branch,
-      defaultTargetBranch: defaultTargetBranch ?? gitInfo.branch,
-      defaultWorkingDir,
-      createdAt: now,
-      updatedAt: now
-    };
+    const repo = getRepo();
+    const created = repo.findOrCreate(resolvedPath, displayName);
 
-    repositories.set(id, repo);
+    // Apply optional fields via update if provided
+    if (defaultTargetBranch || defaultWorkingDir) {
+      const updatePayload: UpdateRepo = {};
+      if (defaultTargetBranch) updatePayload.defaultTargetBranch = defaultTargetBranch;
+      if (defaultWorkingDir) updatePayload.defaultWorkingDir = defaultWorkingDir;
+      const updated = repo.update(created.id, updatePayload);
+      if (updated) {
+        fastify.log.info(`Repository registered: ${updated.id} (${updated.path})`);
+        return reply.status(201).send(updated);
+      }
+    }
 
-    fastify.log.info(`Repository registered: ${id} (${repo.path})`);
-
-    return reply.status(201).send(repo);
+    fastify.log.info(`Repository registered: ${created.id} (${created.path})`);
+    return reply.status(201).send(created);
   });
 
   // POST /api/repos/init - Initialize new repository
@@ -127,37 +123,14 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
         execSync(`git remote add origin ${remote}`, { cwd: resolvedPath, stdio: 'ignore' });
       }
 
-      // Get default branch
-      let branch = 'main';
-      try {
-        branch = execSync('git config init.defaultBranch', {
-          cwd: resolvedPath,
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe']
-        }).trim() || 'main';
-      } catch {
-        // Use default
-      }
+      const displayName = name ?? path.basename(resolvedPath);
 
-      const id = crypto.randomUUID();
-      const now = new Date().toISOString();
+      const repo = getRepo();
+      const created = repo.findOrCreate(resolvedPath, displayName);
 
-      const repo: Repository = {
-        id,
-        name: name ?? path.basename(resolvedPath),
-        path: resolvedPath,
-        remote,
-        defaultBranch: branch,
-        defaultTargetBranch: branch,
-        createdAt: now,
-        updatedAt: now
-      };
+      fastify.log.info(`Repository initialized: ${created.id} (${resolvedPath})`);
 
-      repositories.set(id, repo);
-
-      fastify.log.info(`Repository initialized: ${id} (${resolvedPath})`);
-
-      return reply.status(201).send(repo);
+      return reply.status(201).send(created);
     } catch (err: any) {
       fastify.log.error(`Failed to init repo at ${resolvedPath}:`, err);
       return reply.status(500).send({ error: 'Failed to initialize repository' });
@@ -167,10 +140,8 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
   // POST /api/repos/batch - Get repositories by IDs
   fastify.post<{ Body: { ids: string[] } }>('/repos/batch', async (request) => {
     const { ids } = request.body;
-
-    const repos = ids
-      .map(id => repositories.get(id))
-      .filter((r): r is Repository => r !== undefined);
+    const repo = getRepo();
+    const repos = repo.findByIds(ids);
 
     return {
       repositories: repos,
@@ -181,17 +152,18 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
   // GET /api/repos/:repoId - Get repository
   fastify.get<{ Params: { repoId: string } }>('/repos/:repoId', async (request, reply) => {
     const { repoId } = request.params;
-    const repo = repositories.get(repoId);
+    const repo = getRepo();
+    const found = repo.findById(repoId);
 
-    if (!repo) {
+    if (!found) {
       return reply.status(404).send({ error: 'Repository not found' });
     }
 
     // Get current git status
-    const gitInfo = getGitInfo(repo.path);
+    const gitInfo = getGitInfo(found.path);
 
     return {
-      ...repo,
+      ...found,
       currentBranch: gitInfo?.branch,
       isDirty: gitInfo?.isDirty ?? false
     };
@@ -204,33 +176,34 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
       const { repoId } = request.params;
       const updates = request.body;
 
-      const repo = repositories.get(repoId);
-      if (!repo) {
+      const repo = getRepo();
+
+      // Map UpdateRepoBody to UpdateRepo (DB type)
+      const payload: UpdateRepo = {};
+      if (updates.name !== undefined) payload.displayName = updates.name;
+      if (updates.defaultTargetBranch !== undefined) payload.defaultTargetBranch = updates.defaultTargetBranch;
+      if (updates.defaultWorkingDir !== undefined) payload.defaultWorkingDir = updates.defaultWorkingDir;
+
+      const updated = repo.update(repoId, payload);
+      if (!updated) {
         return reply.status(404).send({ error: 'Repository not found' });
       }
 
-      const updatedRepo: Repository = {
-        ...repo,
-        ...updates,
-        updatedAt: new Date().toISOString()
-      };
-
-      repositories.set(repoId, updatedRepo);
-
-      return updatedRepo;
+      return updated;
     }
   );
 
   // GET /api/repos/:repoId/branches - Get branches
   fastify.get<{ Params: { repoId: string } }>('/repos/:repoId/branches', async (request, reply) => {
     const { repoId } = request.params;
-    const repo = repositories.get(repoId);
+    const repo = getRepo();
+    const found = repo.findById(repoId);
 
-    if (!repo) {
+    if (!found) {
       return reply.status(404).send({ error: 'Repository not found' });
     }
 
-    const branches = getBranches(repo.path);
+    const branches = getBranches(found.path);
 
     return {
       branches,
@@ -241,13 +214,14 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
   // GET /api/repos/:repoId/remotes - Get remotes
   fastify.get<{ Params: { repoId: string } }>('/repos/:repoId/remotes', async (request, reply) => {
     const { repoId } = request.params;
-    const repo = repositories.get(repoId);
+    const repo = getRepo();
+    const found = repo.findById(repoId);
 
-    if (!repo) {
+    if (!found) {
       return reply.status(404).send({ error: 'Repository not found' });
     }
 
-    const remotes = getRemotes(repo.path);
+    const remotes = getRemotes(found.path);
 
     return {
       remotes,
@@ -262,12 +236,13 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
       const { repoId } = request.params;
       const { remote = 'origin' } = request.query;
 
-      const repo = repositories.get(repoId);
-      if (!repo) {
+      const repo = getRepo();
+      const found = repo.findById(repoId);
+      if (!found) {
         return reply.status(404).send({ error: 'Repository not found' });
       }
 
-      const prs = await getPullRequests(repo.path, remote);
+      const prs = await getPullRequests(found.path, remote);
 
       return {
         pullRequests: prs,
@@ -283,12 +258,13 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
       const { repoId } = request.params;
       const { q, mode = 'filename' } = request.query;
 
-      const repo = repositories.get(repoId);
-      if (!repo) {
+      const repo = getRepo();
+      const found = repo.findById(repoId);
+      if (!found) {
         return reply.status(404).send({ error: 'Repository not found' });
       }
 
-      const results = searchRepository(repo.path, q, mode);
+      const results = searchRepository(found.path, q, mode);
 
       return {
         query: q,
@@ -306,12 +282,13 @@ export const repoRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =
       const { repoId } = request.params;
       const { editor = 'vscode', file } = request.body;
 
-      const repo = repositories.get(repoId);
-      if (!repo) {
+      const repo = getRepo();
+      const found = repo.findById(repoId);
+      if (!found) {
         return reply.status(404).send({ error: 'Repository not found' });
       }
 
-      const targetPath = file ? path.join(repo.path, file) : repo.path;
+      const targetPath = file ? path.join(found.path, file) : found.path;
 
       try {
         openInEditor(targetPath, editor);
@@ -512,13 +489,4 @@ function openInEditor(targetPath: string, editor: string): void {
 
   const command = commands[editor] ?? 'code';
   execSync(`${command} "${targetPath}"`, { stdio: 'ignore' });
-}
-
-// Export helpers
-export function getRepository(id: string): Repository | undefined {
-  return repositories.get(id);
-}
-
-export function getAllRepositories(): Repository[] {
-  return Array.from(repositories.values());
 }

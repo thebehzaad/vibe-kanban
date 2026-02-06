@@ -1,127 +1,118 @@
 /**
  * Projects routes
  * Translates: crates/server/src/routes/projects.rs
+ *
+ * Rust pattern: State(deployment) → deployment.db().pool → Project::find_all(&pool)
+ * TS pattern:   fastify.deployment → deployment.db() → new ProjectRepository(db).findAll()
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
+import { ProjectRepository, TaskRepository } from '@orchestrator/db';
 
-// Project types
-export interface Project {
-  id: string;
-  name: string;
-  description?: string;
-  repoPath?: string;
-  createdAt: string;
-  updatedAt: string;
-}
+// Re-export DB types for consumers
+export type { Project } from '@orchestrator/db';
 
 export interface CreateProjectBody {
   name: string;
   description?: string;
   repoPath?: string;
+  defaultAgentWorkingDir?: string;
+  remoteProjectId?: string;
 }
 
 export interface UpdateProjectBody {
   name?: string;
   description?: string;
-  repoPath?: string;
+  defaultAgentWorkingDir?: string;
+  remoteProjectId?: string;
 }
 
-// In-memory store (replace with database)
-const projects = new Map<string, Project>();
-
 export const projectRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new ProjectRepository(db());
+  const getTaskRepo = () => new TaskRepository(db());
+
   // GET /api/projects - List all projects
   fastify.get('/projects', async () => {
-    return {
-      projects: Array.from(projects.values()),
-      total: projects.size
-    };
+    const repo = getRepo();
+    const projects = repo.findAll();
+    return { projects, total: projects.length };
   });
 
   // GET /api/projects/:id - Get project by ID
   fastify.get<{ Params: { id: string } }>('/projects/:id', async (request, reply) => {
-    const { id } = request.params;
-    const project = projects.get(id);
+    const repo = getRepo();
+    const project = repo.findById(request.params.id);
 
     if (!project) {
       return reply.status(404).send({ error: 'Project not found' });
     }
-
     return project;
   });
 
   // POST /api/projects - Create new project
   fastify.post<{ Body: CreateProjectBody }>('/projects', async (request, reply) => {
-    const { name, description, repoPath } = request.body;
+    const repo = getRepo();
+    const { name, remoteProjectId } = request.body;
 
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
+    const project = repo.create({ name });
 
-    const project: Project = {
-      id,
-      name,
-      description,
-      repoPath,
-      createdAt: now,
-      updatedAt: now
-    };
+    // Set optional fields after creation
+    if (remoteProjectId) {
+      repo.setRemoteProjectId(project.id, remoteProjectId);
+    }
 
-    projects.set(id, project);
-
-    return reply.status(201).send(project);
+    return reply.status(201).send(repo.findById(project.id) ?? project);
   });
 
   // PATCH /api/projects/:id - Update project
   fastify.patch<{ Params: { id: string }; Body: UpdateProjectBody }>(
     '/projects/:id',
     async (request, reply) => {
+      const repo = getRepo();
       const { id } = request.params;
-      const updates = request.body;
 
-      const project = projects.get(id);
+      const project = repo.findById(id);
       if (!project) {
         return reply.status(404).send({ error: 'Project not found' });
       }
 
-      const updatedProject: Project = {
-        ...project,
-        ...updates,
-        updatedAt: new Date().toISOString()
-      };
-
-      projects.set(id, updatedProject);
-
-      return updatedProject;
+      const updated = repo.update(id, request.body);
+      return updated;
     }
   );
 
   // DELETE /api/projects/:id - Delete project
   fastify.delete<{ Params: { id: string } }>('/projects/:id', async (request, reply) => {
-    const { id } = request.params;
+    const repo = getRepo();
+    const changes = repo.delete(request.params.id);
 
-    if (!projects.has(id)) {
+    if (changes === 0) {
       return reply.status(404).send({ error: 'Project not found' });
     }
-
-    projects.delete(id);
-
     return reply.status(204).send();
   });
 
   // GET /api/projects/:id/tasks - Get tasks for project
   fastify.get<{ Params: { id: string } }>('/projects/:id/tasks', async (request, reply) => {
+    const projectRepo = getRepo();
     const { id } = request.params;
 
-    if (!projects.has(id)) {
+    if (!projectRepo.findById(id)) {
       return reply.status(404).send({ error: 'Project not found' });
     }
 
-    // TODO: Query tasks from database filtered by projectId
-    return {
-      projectId: id,
-      tasks: [],
-      total: 0
-    };
+    const taskRepo = getTaskRepo();
+    const tasks = taskRepo.findByProjectIdWithAttemptStatus(id);
+
+    return { projectId: id, tasks, total: tasks.length };
+  });
+
+  // GET /api/projects/most-active - Get most active projects
+  fastify.get<{ Querystring: { limit?: string } }>('/projects/most-active', async (request) => {
+    const repo = getRepo();
+    const limit = parseInt(request.query.limit ?? '10') || 10;
+    const projects = repo.findMostActive(limit);
+    return { projects, total: projects.length };
   });
 };

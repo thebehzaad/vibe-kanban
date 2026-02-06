@@ -4,18 +4,12 @@
  */
 
 import { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import * as crypto from 'node:crypto';
+import { TagRepository } from '@orchestrator/db';
 
-// Types
-export interface Tag {
-  id: string;
-  name: string;
-  color: string;
-  description?: string;
-  createdAt: string;
-  updatedAt: string;
-}
+// Re-export DB types for consumers
+export type { Tag } from '@orchestrator/db';
 
+// Body interfaces for route typing
 export interface CreateTagBody {
   name: string;
   color?: string;
@@ -41,12 +35,6 @@ const DEFAULT_COLORS = [
   '#6b7280', // gray
 ];
 
-// In-memory store
-const tags = new Map<string, Tag>();
-
-// Tag assignments (entity_type:entity_id -> tag_ids)
-const tagAssignments = new Map<string, Set<string>>();
-
 let colorIndex = 0;
 function getNextColor(): string {
   const color = DEFAULT_COLORS[colorIndex % DEFAULT_COLORS.length]!;
@@ -55,23 +43,15 @@ function getNextColor(): string {
 }
 
 export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
+  const db = () => fastify.deployment.db();
+  const getRepo = () => new TagRepository(db());
+
   // GET /api/tags - Get all tags
   fastify.get<{ Querystring: { search?: string } }>('/tags', async (request) => {
     const { search } = request.query;
+    const repo = getRepo();
 
-    let tagList = Array.from(tags.values());
-
-    // Filter by search query
-    if (search) {
-      const searchLower = search.toLowerCase();
-      tagList = tagList.filter(tag =>
-        tag.name.toLowerCase().includes(searchLower) ||
-        tag.description?.toLowerCase().includes(searchLower)
-      );
-    }
-
-    // Sort alphabetically
-    tagList.sort((a, b) => a.name.localeCompare(b.name));
+    const tagList = repo.findAll(search);
 
     return {
       tags: tagList,
@@ -82,30 +62,21 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
   // POST /api/tags - Create tag
   fastify.post<{ Body: CreateTagBody }>('/tags', async (request, reply) => {
     const { name, color, description } = request.body;
+    const repo = getRepo();
 
     // Check for duplicate name
-    const existingTag = Array.from(tags.values()).find(
-      t => t.name.toLowerCase() === name.toLowerCase()
-    );
+    const existingTag = repo.findByName(name);
     if (existingTag) {
       return reply.status(409).send({ error: 'Tag with this name already exists' });
     }
 
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
-
-    const tag: Tag = {
-      id,
+    const tag = repo.create({
       name,
       color: color ?? getNextColor(),
-      description,
-      createdAt: now,
-      updatedAt: now
-    };
+      description
+    });
 
-    tags.set(id, tag);
-
-    fastify.log.info(`Tag created: ${id} (${name})`);
+    fastify.log.info(`Tag created: ${tag.id} (${name})`);
 
     return reply.status(201).send(tag);
   });
@@ -113,7 +84,8 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
   // GET /api/tags/:tagId - Get tag by ID
   fastify.get<{ Params: { tagId: string } }>('/tags/:tagId', async (request, reply) => {
     const { tagId } = request.params;
-    const tag = tags.get(tagId);
+    const repo = getRepo();
+    const tag = repo.findById(tagId);
 
     if (!tag) {
       return reply.status(404).send({ error: 'Tag not found' });
@@ -128,29 +100,22 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
     async (request, reply) => {
       const { tagId } = request.params;
       const updates = request.body;
+      const repo = getRepo();
 
-      const tag = tags.get(tagId);
+      const tag = repo.findById(tagId);
       if (!tag) {
         return reply.status(404).send({ error: 'Tag not found' });
       }
 
       // Check for duplicate name
       if (updates.name && updates.name.toLowerCase() !== tag.name.toLowerCase()) {
-        const existingTag = Array.from(tags.values()).find(
-          t => t.id !== tagId && t.name.toLowerCase() === updates.name!.toLowerCase()
-        );
-        if (existingTag) {
+        const existingTag = repo.findByName(updates.name);
+        if (existingTag && existingTag.id !== tagId) {
           return reply.status(409).send({ error: 'Tag with this name already exists' });
         }
       }
 
-      const updatedTag: Tag = {
-        ...tag,
-        ...updates,
-        updatedAt: new Date().toISOString()
-      };
-
-      tags.set(tagId, updatedTag);
+      const updatedTag = repo.update(tagId, updates);
 
       return updatedTag;
     }
@@ -159,22 +124,14 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
   // DELETE /api/tags/:tagId - Delete tag
   fastify.delete<{ Params: { tagId: string } }>('/tags/:tagId', async (request, reply) => {
     const { tagId } = request.params;
+    const repo = getRepo();
 
-    if (!tags.has(tagId)) {
+    const tag = repo.findById(tagId);
+    if (!tag) {
       return reply.status(404).send({ error: 'Tag not found' });
     }
 
-    tags.delete(tagId);
-
-    // Remove tag from all assignments
-    for (const [key, assignedTags] of tagAssignments) {
-      if (assignedTags.has(tagId)) {
-        assignedTags.delete(tagId);
-        if (assignedTags.size === 0) {
-          tagAssignments.delete(key);
-        }
-      }
-    }
+    repo.delete(tagId);
 
     fastify.log.info(`Tag deleted: ${tagId}`);
 
@@ -187,19 +144,14 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
     async (request, reply) => {
       const { tagId } = request.params;
       const { entityType, entityId } = request.body;
+      const repo = getRepo();
 
-      if (!tags.has(tagId)) {
+      const tag = repo.findById(tagId);
+      if (!tag) {
         return reply.status(404).send({ error: 'Tag not found' });
       }
 
-      const key = `${entityType}:${entityId}`;
-      let assigned = tagAssignments.get(key);
-      if (!assigned) {
-        assigned = new Set();
-        tagAssignments.set(key, assigned);
-      }
-
-      assigned.add(tagId);
+      repo.assignToEntity(tagId, entityType, entityId);
 
       return { success: true, entityType, entityId, tagId };
     }
@@ -211,16 +163,9 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
     async (request, reply) => {
       const { tagId } = request.params;
       const { entity_type: entityType, entity_id: entityId } = request.query;
+      const repo = getRepo();
 
-      const key = `${entityType}:${entityId}`;
-      const assigned = tagAssignments.get(key);
-
-      if (assigned) {
-        assigned.delete(tagId);
-        if (assigned.size === 0) {
-          tagAssignments.delete(key);
-        }
-      }
+      repo.removeFromEntity(tagId, entityType, entityId);
 
       return reply.status(204).send();
     }
@@ -231,13 +176,9 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
     '/tags/entity/:entityType/:entityId',
     async (request) => {
       const { entityType, entityId } = request.params;
+      const repo = getRepo();
 
-      const key = `${entityType}:${entityId}`;
-      const assignedTagIds = tagAssignments.get(key) ?? new Set();
-
-      const entityTags = Array.from(assignedTagIds)
-        .map(id => tags.get(id))
-        .filter((t): t is Tag => t !== undefined);
+      const entityTags = repo.getTagsForEntity(entityType, entityId);
 
       return {
         entityType,
@@ -248,31 +189,3 @@ export const tagRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) =>
     }
   );
 };
-
-// Export helpers
-export function getTag(id: string): Tag | undefined {
-  return tags.get(id);
-}
-
-export function getTagsForEntity(entityType: string, entityId: string): Tag[] {
-  const key = `${entityType}:${entityId}`;
-  const assignedTagIds = tagAssignments.get(key) ?? new Set();
-
-  return Array.from(assignedTagIds)
-    .map(id => tags.get(id))
-    .filter((t): t is Tag => t !== undefined);
-}
-
-export function assignTag(tagId: string, entityType: string, entityId: string): boolean {
-  if (!tags.has(tagId)) return false;
-
-  const key = `${entityType}:${entityId}`;
-  let assigned = tagAssignments.get(key);
-  if (!assigned) {
-    assigned = new Set();
-    tagAssignments.set(key, assigned);
-  }
-
-  assigned.add(tagId);
-  return true;
-}

@@ -10,12 +10,17 @@
  * - RemoteDeployment (@orchestrator/remote)
  */
 
-import type { DbPool } from '@orchestrator/db';
+import type { DBService } from '@orchestrator/db';
 import type {
   GitService,
   ContainerService,
   ConfigService,
-  ProjectService
+  ProjectService,
+  EventsService,
+  FilesystemService,
+  ApprovalService,
+  NotificationService,
+  QueuedMessageService,
 } from '@orchestrator/services';
 
 export interface DeploymentError {
@@ -35,13 +40,13 @@ export interface Deployment {
   /** Initialize the deployment */
   initialize(): Promise<void>;
 
-  /** Get database connection pool */
-  db(): DbPool;
+  /** Get database service */
+  db(): DBService;
 
   /** Get configuration service */
   config(): ConfigService;
 
-  /** Get git service */
+  /** Get git service for a repo */
   git(repoPath: string): GitService;
 
   /** Get container service */
@@ -50,8 +55,35 @@ export interface Deployment {
   /** Get project service */
   project(): ProjectService;
 
+  /** Get events service */
+  events(): EventsService;
+
+  /** Get filesystem service */
+  filesystem(basePath: string): FilesystemService;
+
+  /** Get approval service */
+  approvals(): ApprovalService;
+
+  /** Get notification service */
+  notifications(): NotificationService;
+
+  /** Get queued message service */
+  queuedMessages(): QueuedMessageService;
+
   /** Cleanup deployment resources */
   cleanup(): Promise<void>;
 }
 
-export type { DbPool, GitService, ContainerService, ConfigService, ProjectService };
+// Re-export types for convenience
+export type {
+  DBService as DbPool,
+  GitService,
+  ContainerService,
+  ConfigService,
+  ProjectService,
+  EventsService,
+  FilesystemService,
+  ApprovalService,
+  NotificationService,
+  QueuedMessageService,
+};

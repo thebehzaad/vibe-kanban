@@ -1,6 +1,6 @@
 /**
- * Google Gemini CLI executor
- * Translates: crates/executors/src/executors/gemini.rs
+ * AMP agent executor
+ * Translates: crates/executors/src/executors/amp.rs
  */
 
 import { BaseExecutor } from './base.js';
@@ -10,43 +10,40 @@ import type {
   ExecutorType, NormalizeResult, SpawnedChild,
 } from './types.js';
 
-export interface GeminiConfig extends ExecutorConfig {
-  type: 'gemini';
-  apiKey?: string;
-  model?: string; // defaults to gemini-2.5-pro
+export interface AmpConfig extends ExecutorConfig {
+  type: 'amp';
 }
 
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-pro';
-
-export class GeminiExecutor extends BaseExecutor {
+export class AmpExecutor extends BaseExecutor {
   private sessions = new Map<string, ExecutorSession>();
-  constructor(config: GeminiConfig) { super(config); }
-  get name(): string { return 'Gemini'; }
-  get type(): ExecutorType { return 'gemini'; }
-  private get geminiConfig(): GeminiConfig { return this.config as GeminiConfig; }
+  constructor(config: AmpConfig) { super(config); }
+  get name(): string { return 'AMP'; }
+  get type(): ExecutorType { return 'amp'; }
+  private get ampConfig(): AmpConfig { return this.config as AmpConfig; }
 
   async resolveCommand(): Promise<{ command: string; args: string[] } | undefined> {
-    const geminiPath = which('gemini');
-    if (geminiPath) {
-      return { command: geminiPath, args: [] };
+    const ampPath = which('amp');
+    if (ampPath) {
+      return { command: ampPath, args: [] };
     }
 
     return undefined;
   }
 
-  /** Build command-line arguments for gemini */
+  /** Build command-line arguments for amp */
   buildArgs(request: ExecutionRequest): string[] {
     const args: string[] = [];
 
-    const model = this.geminiConfig.model ?? DEFAULT_GEMINI_MODEL;
-    args.push('--model', model);
+    if (this.ampConfig.model) {
+      args.push('--model', this.ampConfig.model);
+    }
 
     args.push('--prompt', request.prompt);
 
     return args;
   }
 
-  /** Spawn Gemini as a child process */
+  /** Spawn AMP as a child process */
   async spawn(request: ExecutionRequest, msgStore: MsgStore): Promise<SpawnedChild | undefined> {
     const resolved = await this.resolveCommand();
     if (!resolved) return undefined;
@@ -54,9 +51,6 @@ export class GeminiExecutor extends BaseExecutor {
     const args = [...resolved.args, ...this.buildArgs(request)];
 
     const env: Record<string, string> = { ...process.env as Record<string, string> };
-    if (this.geminiConfig.apiKey) {
-      env.GEMINI_API_KEY = this.geminiConfig.apiKey;
-    }
     if (request.env) {
       Object.assign(env, request.env);
     }
@@ -71,15 +65,12 @@ export class GeminiExecutor extends BaseExecutor {
   async execute(request: ExecutionRequest): Promise<ExecutionResult> {
     const resolved = await this.resolveCommand();
     if (!resolved) {
-      return { success: false, output: '', error: 'Gemini CLI not found' };
+      return { success: false, output: '', error: 'AMP CLI not found' };
     }
 
     const args = [...resolved.args, ...this.buildArgs(request)];
 
     const env: Record<string, string> = { ...process.env as Record<string, string> };
-    if (this.geminiConfig.apiKey) {
-      env.GEMINI_API_KEY = this.geminiConfig.apiKey;
-    }
     if (request.env) {
       Object.assign(env, request.env);
     }
@@ -100,7 +91,7 @@ export class GeminiExecutor extends BaseExecutor {
   async createSession(): Promise<ExecutorSession> {
     const session: ExecutorSession = {
       id: crypto.randomUUID(),
-      executorType: 'gemini',
+      executorType: 'amp',
       messages: [],
       createdAt: new Date(),
     };
