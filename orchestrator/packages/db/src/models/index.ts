@@ -89,3 +89,61 @@ export {
   type UpdateScratchItem,
   ScratchRepository
 } from './scratch.js';
+
+// CodingAgentTurn model
+export {
+  type CodingAgentTurn,
+  type CreateCodingAgentTurn,
+  CodingAgentTurnRepository
+} from './coding-agent-turn.js';
+
+// ExecutionProcessLog model
+export {
+  type ExecutionProcessLog as ExecutionProcessLogModel,
+  type CreateExecutionProcessLog,
+  ExecutionProcessLogRepository
+} from './execution-process-logs.js';
+
+// ExecutionProcessRepoState model
+export {
+  type ExecutionProcessRepoState as ExecutionProcessRepoStateModel,
+  type ExecutionProcessRepoStateWithRepo as ExecutionProcessRepoStateWithRepoModel,
+  type CreateExecutionProcessRepoState as CreateExecutionProcessRepoStateModel,
+  type UpdateExecutionProcessRepoState,
+  ExecutionProcessRepoStateRepository
+} from './execution-process-repo-state.js';
+
+// Merge model
+export {
+  type Merge,
+  type MergeStatus,
+  type CreateMerge,
+  type UpdateMerge,
+  MergeRepository
+} from './merge.js';
+
+// MigrationState model
+export {
+  type MigrationState,
+  type MigrationType,
+  type MigrationStatus,
+  type CreateMigrationState,
+  type UpdateMigrationState,
+  MigrationStateRepository
+} from './migration-state.js';
+
+// ProjectRepo model
+export {
+  type ProjectRepo,
+  type CreateProjectRepo,
+  type UpdateProjectRepo,
+  ProjectRepoRepository
+} from './project-repo.js';
+
+// WorkspaceRepo model
+export {
+  type WorkspaceRepo,
+  type CreateWorkspaceRepo,
+  type WorkspaceRepoWithDetails,
+  WorkspaceRepoRepository
+} from './workspace-repo.js';
