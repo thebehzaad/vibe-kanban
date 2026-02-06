@@ -266,30 +266,6 @@ export function commandExists(command: string): boolean {
 }
 
 /**
- * Run a command synchronously
- */
-export function runCommandSync(command: string, args: string[], options?: SpawnOptions): CommandResult {
-  try {
-    const result = execSync(`${command} ${args.join(' ')}`, {
-      ...options,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-    return {
-      stdout: result,
-      stderr: '',
-      exitCode: 0
-    };
-  } catch (error: any) {
-    return {
-      stdout: error.stdout || '',
-      stderr: error.stderr || error.message,
-      exitCode: error.status || 1
-    };
-  }
-}
-
-/**
  * Get the current working shell type
  */
 export type ShellType = 'zsh' | 'bash' | 'sh' | 'cmd' | 'powershell' | 'other';

@@ -3,7 +3,7 @@
  * Translates: crates/utils/src/git.rs and related git functionality
  */
 
-import { runCommand, runCommandSync } from './shell.js';
+import { runCommand } from './shell.js';
 
 /**
  * Check if a branch name is valid according to git rules
@@ -54,41 +54,11 @@ export async function getCurrentBranch(cwd?: string): Promise<string | undefined
 }
 
 /**
- * Get the current git branch name (sync)
- */
-export function getCurrentBranchSync(cwd?: string): string | undefined {
-  try {
-    const result = runCommandSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
-    if (result.exitCode === 0) {
-      return result.stdout.trim();
-    }
-  } catch {
-    // Ignore errors
-  }
-  return undefined;
-}
-
-/**
  * Get the current HEAD commit hash
  */
 export async function getHeadCommit(cwd?: string): Promise<string | undefined> {
   try {
     const result = await runCommand('git', ['rev-parse', 'HEAD'], { cwd });
-    if (result.exitCode === 0) {
-      return result.stdout.trim();
-    }
-  } catch {
-    // Ignore errors
-  }
-  return undefined;
-}
-
-/**
- * Get the current HEAD commit hash (sync)
- */
-export function getHeadCommitSync(cwd?: string): string | undefined {
-  try {
-    const result = runCommandSync('git', ['rev-parse', 'HEAD'], { cwd });
     if (result.exitCode === 0) {
       return result.stdout.trim();
     }
@@ -111,38 +81,11 @@ export async function isGitRepository(dirPath: string): Promise<boolean> {
 }
 
 /**
- * Check if a directory is a git repository (sync)
- */
-export function isGitRepositorySync(dirPath: string): boolean {
-  try {
-    const result = runCommandSync('git', ['rev-parse', '--git-dir'], { cwd: dirPath });
-    return result.exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Get the root directory of a git repository
  */
 export async function getGitRoot(cwd?: string): Promise<string | undefined> {
   try {
     const result = await runCommand('git', ['rev-parse', '--show-toplevel'], { cwd });
-    if (result.exitCode === 0) {
-      return result.stdout.trim();
-    }
-  } catch {
-    // Ignore errors
-  }
-  return undefined;
-}
-
-/**
- * Get the root directory of a git repository (sync)
- */
-export function getGitRootSync(cwd?: string): string | undefined {
-  try {
-    const result = runCommandSync('git', ['rev-parse', '--show-toplevel'], { cwd });
     if (result.exitCode === 0) {
       return result.stdout.trim();
     }

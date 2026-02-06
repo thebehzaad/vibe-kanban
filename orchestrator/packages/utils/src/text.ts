@@ -152,7 +152,8 @@ export function dedent(text: string): string {
   const minIndent = Math.min(
     ...nonEmptyLines.map(line => {
       const match = line.match(/^(\s*)/);
-      return match ? match[1].length : 0;
+      const captured = match?.[1];
+      return captured !== undefined ? captured.length : 0;
     })
   );
 

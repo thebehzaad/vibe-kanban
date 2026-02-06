@@ -34,29 +34,9 @@ export function getPortFilePath(): string {
   return path.join(getAssetDir(), 'port');
 }
 
-/**
- * Get cache directory path
- * Translates: crates/utils/src/lib.rs::cache_dir()
- */
-export function getCacheDir(): string {
-  const isDev = process.env.NODE_ENV === 'development';
-  const appName = isDev ? 'vibe-kanban-dev' : 'vibe-kanban';
-  
-  // Platform-specific cache directories
-  if (process.platform === 'darwin') {
-    // macOS: ~/Library/Caches/vibe-kanban
-    return path.join(os.homedir(), 'Library', 'Caches', appName);
-  } else if (process.platform === 'win32') {
-    // Windows: %LOCALAPPDATA%\vibe-kanban
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), appName);
-  } else {
-    // Linux: ~/.cache/vibe-kanban (respects XDG_CACHE_HOME)
-    const cacheHome = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
-    return path.join(cacheHome, appName);
-  }
-}
-
 export async function ensureCacheDir(): Promise<string> {
+  // Import getCacheDir from path to avoid duplicate export
+  const { getCacheDir } = await import('./path.js');
   const cacheDir = getCacheDir();
   await fs.mkdir(cacheDir, { recursive: true });
   return cacheDir;

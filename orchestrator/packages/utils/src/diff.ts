@@ -262,9 +262,9 @@ export function parseDiff(diffText: string): FileDiff[] {
       const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
       if (match) {
         currentHunk = {
-          oldStart: parseInt(match[1], 10),
+          oldStart: parseInt(match[1] || '1', 10),
           oldLines: parseInt(match[2] || '1', 10),
-          newStart: parseInt(match[3], 10),
+          newStart: parseInt(match[3] || '1', 10),
           newLines: parseInt(match[4] || '1', 10),
           content: ''
         };
@@ -295,7 +295,10 @@ export function applyDiff(original: string, diff: FileDiff): string {
   for (const hunk of diff.hunks) {
     // Copy unchanged lines before this hunk
     while (lineIndex < hunk.oldStart - 1) {
-      result.push(lines[lineIndex]);
+      const line = lines[lineIndex];
+      if (line !== undefined) {
+        result.push(line);
+      }
       lineIndex++;
     }
 
@@ -318,7 +321,10 @@ export function applyDiff(original: string, diff: FileDiff): string {
 
   // Copy remaining lines
   while (lineIndex < lines.length) {
-    result.push(lines[lineIndex]);
+    const line = lines[lineIndex];
+    if (line !== undefined) {
+      result.push(line);
+    }
     lineIndex++;
   }
 

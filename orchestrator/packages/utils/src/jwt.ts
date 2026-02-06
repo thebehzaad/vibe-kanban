@@ -29,7 +29,11 @@ export function decodeJwtPayload(token: string): JwtPayload {
 
   try {
     // Decode base64url to base64
-    const base64 = parts[1]
+    const base64Part = parts[1];
+    if (!base64Part) {
+      throw new TokenClaimsError('Invalid JWT: missing payload');
+    }
+    const base64 = base64Part
       .replace(/-/g, '+')
       .replace(/_/g, '/');
 

@@ -123,7 +123,12 @@ export class MsgStore {
           const entry = await new Promise<MsgStoreEntry | null>((resolve) => {
             // Check if there are already new entries
             if (nextIdx < store.entries.length) {
-              resolve(store.entries[nextIdx]);
+              const foundEntry = store.entries[nextIdx];
+              if (foundEntry) {
+                resolve(foundEntry);
+              } else {
+                resolve(null);
+              }
               return;
             }
 

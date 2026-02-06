@@ -16,10 +16,8 @@
     "build": "tsc --build",
     "dev": "tsc --build --watch",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
-  },
-  "dependencies": {
-    "simple-git": "^3.25.0"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "test": "node --test"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
