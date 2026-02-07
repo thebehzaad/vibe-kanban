@@ -46,9 +46,9 @@ importers:
 
   packages/executors:
     dependencies:
-      '@runner/db':
+      '@runner/git':
         specifier: workspace:*
-        version: link:../db
+        version: link:../git
       '@runner/utils':
         specifier: workspace:*
         version: link:../utils

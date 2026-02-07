@@ -1,168 +1,204 @@
 /**
- * Command execution utilities
- * Displaced from @runner/utils (not in Rust crate utils)
- *
- * These utilities were removed from utils to keep it a faithful translation
- * of crates/utils. They live here in executors as the primary consumer.
+ * Command building utilities
+ * Translates: crates/executors/src/command.rs
  */
 
-import { spawn, type SpawnOptions } from 'node:child_process';
-import * as path from 'node:path';
-import * as fs from 'node:fs';
-import { getShellCommand } from '@runner/utils';
+import { resolveExecutablePath } from '@runner/utils';
 
-export interface CommandResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
+// --- Errors ---
 
-export interface StreamingCommandOptions extends SpawnOptions {
-  onStdout?: (data: string) => void;
-  onStderr?: (data: string) => void;
-  timeout?: number;
-}
-
-/**
- * Run a command and return the result
- */
-export async function runCommand(
-  command: string,
-  args: string[],
-  options?: SpawnOptions
-): Promise<CommandResult> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, {
-      ...options,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on('close', (code) => {
-      resolve({
-        stdout,
-        stderr,
-        exitCode: code ?? 1
-      });
-    });
-
-    proc.on('error', reject);
-  });
-}
-
-/**
- * Run a command with streaming output
- */
-export async function runCommandStreaming(
-  command: string,
-  args: string[],
-  options?: StreamingCommandOptions
-): Promise<CommandResult> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, {
-      ...options,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let timeoutId: NodeJS.Timeout | undefined;
-
-    if (options?.timeout) {
-      timeoutId = setTimeout(() => {
-        proc.kill('SIGTERM');
-        reject(new Error(`Command timed out after ${options.timeout}ms`));
-      }, options.timeout);
-    }
-
-    proc.stdout?.on('data', (data) => {
-      const str = data.toString();
-      stdout += str;
-      options?.onStdout?.(str);
-    });
-
-    proc.stderr?.on('data', (data) => {
-      const str = data.toString();
-      stderr += str;
-      options?.onStderr?.(str);
-    });
-
-    proc.on('close', (code) => {
-      if (timeoutId) clearTimeout(timeoutId);
-      resolve({
-        stdout,
-        stderr,
-        exitCode: code ?? 1
-      });
-    });
-
-    proc.on('error', (err) => {
-      if (timeoutId) clearTimeout(timeoutId);
-      reject(err);
-    });
-  });
-}
-
-/**
- * Run a shell command (through the default shell)
- */
-export async function runShellCommand(
-  command: string,
-  options?: SpawnOptions
-): Promise<CommandResult> {
-  const { shell, shellArg } = getShellCommand();
-  return runCommand(shell, [shellArg, command], options);
-}
-
-/**
- * Find executable in PATH (synchronous)
- */
-export function which(executable: string): string | undefined {
-  const pathEnv = process.env.PATH || '';
-  const pathSeparator = process.platform === 'win32' ? ';' : ':';
-  const extensions = process.platform === 'win32'
-    ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')
-    : [''];
-
-  for (const dir of pathEnv.split(pathSeparator)) {
-    if (!dir) continue;
-
-    for (const ext of extensions) {
-      const fullPath = path.join(dir, executable + ext);
-      try {
-        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-          if (process.platform !== 'win32') {
-            try {
-              fs.accessSync(fullPath, fs.constants.X_OK);
-              return fullPath;
-            } catch {
-              continue;
-            }
-          }
-          return fullPath;
-        }
-      } catch {
-        continue;
-      }
-    }
+export class CommandBuildError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CommandBuildError';
   }
 
-  return undefined;
+  static invalidBase(input: string): CommandBuildError {
+    return new CommandBuildError(`base command cannot be parsed: ${input}`);
+  }
+
+  static emptyCommand(): CommandBuildError {
+    return new CommandBuildError('base command is empty after parsing');
+  }
+
+  static invalidShellParams(detail: string): CommandBuildError {
+    return new CommandBuildError(`invalid shell parameters: ${detail}`);
+  }
 }
 
+// --- CommandParts ---
+
+export class CommandParts {
+  constructor(
+    public readonly program: string,
+    public readonly args: string[],
+  ) {}
+
+  async intoResolved(): Promise<{ executable: string; args: string[] }> {
+    const executable = await resolveExecutablePath(this.program);
+    if (!executable) {
+      // Import ExecutorError lazily to avoid circular deps
+      throw new Error(`Executable \`${this.program}\` not found in PATH`);
+    }
+    return { executable, args: this.args };
+  }
+}
+
+// --- CmdOverrides ---
+
+export interface CmdOverrides {
+  baseCommandOverride?: string;
+  additionalParams?: string[];
+  env?: Record<string, string>;
+}
+
+// --- CommandBuilder ---
+
+export class CommandBuilder {
+  public base: string;
+  public params: string[] | undefined;
+
+  constructor(base: string) {
+    this.base = base;
+    this.params = undefined;
+  }
+
+  setParams(params: string[]): this {
+    this.params = [...params];
+    return this;
+  }
+
+  overrideBase(base: string): this {
+    this.base = base;
+    return this;
+  }
+
+  extendShellParams(more: string[]): this {
+    const joined = more.join(' ').trim();
+    if (!joined) return this;
+
+    const extra = splitCommandLine(joined);
+    if (this.params) {
+      this.params.push(...extra);
+    } else {
+      this.params = extra;
+    }
+    return this;
+  }
+
+  extendParams(more: string[]): this {
+    if (this.params) {
+      this.params.push(...more);
+    } else {
+      this.params = [...more];
+    }
+    return this;
+  }
+
+  buildInitial(): CommandParts {
+    return this._build([]);
+  }
+
+  buildFollowUp(additionalArgs: string[]): CommandParts {
+    return this._build(additionalArgs);
+  }
+
+  private _build(additionalArgs: string[]): CommandParts {
+    const parts: string[] = [];
+    const baseParts = splitCommandLine(this.base);
+    parts.push(...baseParts);
+    if (this.params) {
+      parts.push(...this.params);
+    }
+    parts.push(...additionalArgs);
+
+    if (parts.length === 0) {
+      throw CommandBuildError.emptyCommand();
+    }
+
+    const program = parts.shift()!;
+    return new CommandParts(program, parts);
+  }
+}
+
+// --- splitCommandLine ---
+
 /**
- * Check if a command exists
+ * Split a command line string into parts, respecting quotes.
+ * On Windows uses simple split; on Unix uses shell-like parsing.
  */
-export function commandExists(command: string): boolean {
-  return which(command) !== undefined;
+function splitCommandLine(input: string): string[] {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw CommandBuildError.emptyCommand();
+  }
+
+  // Simple shell-like splitting that respects quotes
+  const parts: string[] = [];
+  let current = '';
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (const char of trimmed) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+
+    if (char === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+
+    if ((char === ' ' || char === '\t') && !inSingle && !inDouble) {
+      if (current) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current) {
+    parts.push(current);
+  }
+
+  if (inSingle || inDouble) {
+    throw CommandBuildError.invalidBase(input);
+  }
+
+  if (parts.length === 0) {
+    throw CommandBuildError.emptyCommand();
+  }
+
+  return parts;
+}
+
+// --- applyOverrides ---
+
+export function applyOverrides(
+  builder: CommandBuilder,
+  overrides: CmdOverrides,
+): CommandBuilder {
+  if (overrides.baseCommandOverride) {
+    builder.overrideBase(overrides.baseCommandOverride);
+  }
+  if (overrides.additionalParams) {
+    builder.extendShellParams(overrides.additionalParams);
+  }
+  return builder;
 }
