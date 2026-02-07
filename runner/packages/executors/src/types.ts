@@ -4,7 +4,36 @@
  */
 
 import type { ChildProcess } from 'node:child_process';
-import type { NormalizedEntry, LogMsg, MsgStore } from '@runner/utils';
+import type { LogMsg, MsgStore } from '@runner/utils';
+
+/** Normalized log entry types */
+export type NormalizedEntryType =
+  | 'user_message'
+  | 'assistant_message'
+  | 'tool_call'
+  | 'tool_result'
+  | 'file_edit'
+  | 'file_create'
+  | 'file_delete'
+  | 'command_execution'
+  | 'command_output'
+  | 'approval_request'
+  | 'approval_response'
+  | 'error'
+  | 'thinking'
+  | 'system'
+  | 'progress';
+
+/** A normalized log entry parsed from raw output */
+export interface NormalizedEntry {
+  index: number;
+  type: NormalizedEntryType;
+  content: string;
+  timestamp: Date;
+  metadata?: Record<string, unknown>;
+  messageUuid?: string;
+  sessionId?: string;
+}
 
 export type ExecutorType =
   | 'claude'

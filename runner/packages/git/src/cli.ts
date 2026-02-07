@@ -8,16 +8,11 @@
  * - Cross-platform stability: More reliable than libgit2 in complex scenarios
  */
 
-import { spawn } from 'child_process';
-import { existsSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-
-/**
- * Directories to always exclude from git operations
- */
-const ALWAYS_SKIP_DIRS = ['node_modules', '.git', 'dist', 'build'];
-
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ALWAYS_SKIP_DIRS, resolveExecutablePathBlocking } from '@runner/utils';
 
 export class GitCliError extends Error {
   constructor(message: string, public code?: string) {
@@ -78,22 +73,17 @@ export interface WorktreeEntry {
 }
 
 export interface StatusDiffOptions {
-  pathFilter?: string[]; // pathspecs to limit diff
+  pathFilter?: string[];
 }
 
 /**
  * Parsed entry from `git status --porcelain`
  */
 export interface StatusEntry {
-  /** Single-letter staged status (column X) or '?' for untracked */
   staged: string;
-  /** Single-letter unstaged status (column Y) or '?' for untracked */
   unstaged: string;
-  /** Current path */
   path: Buffer;
-  /** Original path (for renames) */
   origPath?: Buffer;
-  /** True if this entry is untracked ("??") */
   isUntracked: boolean;
 }
 
@@ -107,9 +97,8 @@ export interface WorktreeStatus {
 }
 
 export class GitCli {
-  /**
-   * Run `git -C <repo> worktree add <path> <branch>` (optionally creating the branch with -b)
-   */
+  // ── Worktree operations ──
+
   async worktreeAdd(
     repoPath: string,
     worktreePath: string,
@@ -123,39 +112,29 @@ export class GitCli {
       args.push('-b', branch);
     }
     args.push(worktreePath, branch);
-    
     await this.git(repoPath, args);
 
-    // Good practice: reapply sparse-checkout in the new worktree
     try {
       await this.git(worktreePath, ['sparse-checkout', 'reapply']);
     } catch {
-      // Non-fatal if it fails or not configured
+      // Non-fatal
     }
   }
 
-  /**
-   * Run `git -C <repo> worktree remove <path>`
-   */
   async worktreeRemove(
     repoPath: string,
     worktreePath: string,
     force: boolean = false
   ): Promise<void> {
     await this.ensureAvailable();
-    
     const args: string[] = ['worktree', 'remove'];
     if (force) {
       args.push('--force');
     }
     args.push(worktreePath);
-    
     await this.git(repoPath, args);
   }
 
-  /**
-   * Run `git -C <repo> worktree move <old_path> <new_path>`
-   */
   async worktreeMove(
     repoPath: string,
     oldPath: string,
@@ -165,44 +144,30 @@ export class GitCli {
     await this.git(repoPath, ['worktree', 'move', oldPath, newPath]);
   }
 
-  /**
-   * Prune stale worktree metadata
-   */
   async worktreePrune(repoPath: string): Promise<void> {
     await this.git(repoPath, ['worktree', 'prune']);
   }
 
-  /**
-   * Return true if there are any changes in the working tree (staged or unstaged).
-   */
+  // ── Status / diff operations ──
+
   async hasChanges(worktreePath: string): Promise<boolean> {
     const out = await this.git(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
     return out.trim().length > 0;
   }
 
-  /**
-   * Diff status vs a base branch using a temporary index (always includes untracked).
-   * Path filter limits the reported paths.
-   */
   async diffStatus(
     worktreePath: string,
     baseCommit: string,
     opts: StatusDiffOptions = {}
   ): Promise<StatusDiffEntry[]> {
-    // Create a temp index file
     const tmpIndex = join(tmpdir(), `git-index-${Date.now()}`);
-    const envs: Record<string, string> = {
-      GIT_INDEX_FILE: tmpIndex
-    };
+    const envs: Record<string, string> = { GIT_INDEX_FILE: tmpIndex };
 
     try {
-      // Use a temp index from HEAD to accurately track renames in untracked files
       await this.gitWithEnv(worktreePath, ['read-tree', 'HEAD'], envs);
 
-      // Stage changed and untracked files
       const status = await this.getWorktreeStatus(worktreePath);
       const pathsToAdd: Buffer[] = [];
-      
       for (const entry of status.entries) {
         pathsToAdd.push(entry.path);
         if (entry.origPath) {
@@ -213,33 +178,28 @@ export class GitCli {
       if (pathsToAdd.length > 0) {
         const excludes = this.getDefaultPathspecExcludes();
         const allPaths = [...pathsToAdd.map(p => p.toString()), ...excludes];
-        
-        // Add files to temp index
+        const stdinBuf = Buffer.concat(allPaths.map(p => Buffer.from(p + '\0')));
+
         await this.gitWithStdin(
           worktreePath,
-          ['--no-optional-locks', 'update-index', '--add', '--remove', '-z', '--stdin'],
+          ['add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'],
           envs,
-          Buffer.concat(allPaths.map(p => Buffer.from(p + '\0')))
+          stdinBuf
         );
       }
 
-      // Get diff with rename detection
-      const diffArgs = [
-        '--no-optional-locks',
-        'diff-index',
-        '--name-status',
-        '--find-renames',
-        '--find-copies',
-        '-z',
-        baseCommit
+      // git diff --cached with rename detection
+      let diffArgs = [
+        '-c', 'core.quotepath=false',
+        'diff', '--cached', '-M', '--name-status',
+        baseCommit,
       ];
-
-      const diffOut = await this.gitWithEnv(worktreePath, diffArgs, envs);
-      return this.parseDiffStatus(diffOut);
+      diffArgs = this.applyPathspecFilter(diffArgs, opts.pathFilter);
+      const out = await this.gitWithEnv(worktreePath, diffArgs, envs);
+      return this.parseNameStatus(out);
     } finally {
-      // Clean up temp index
       try {
-        const fs = await import('fs/promises');
+        const fs = await import('node:fs/promises');
         await fs.unlink(tmpIndex);
       } catch {
         // Ignore cleanup errors
@@ -247,12 +207,12 @@ export class GitCli {
     }
   }
 
-  /**
-   * Get detailed worktree status
-   */
   async getWorktreeStatus(worktreePath: string): Promise<WorktreeStatus> {
-    const out = await this.git(worktreePath, ['--no-optional-locks', 'status', '--porcelain', '-z']);
-    
+    const args = this.applyDefaultExcludes([
+      '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=normal'
+    ]);
+    const out = await this.git(worktreePath, args);
+
     const entries: StatusEntry[] = [];
     let uncommittedTracked = 0;
     let untracked = 0;
@@ -261,49 +221,40 @@ export class GitCli {
       return { uncommittedTracked, untracked, entries };
     }
 
-    const parts = out.split('\0').filter(p => p.length > 0);
+    const parts = out.split('\0');
     let i = 0;
 
     while (i < parts.length) {
-      const statusLine = parts[i];
-      if (!statusLine || statusLine.length < 3) {
+      const part = parts[i];
+      if (!part || part.length < 4) {
         i++;
         continue;
       }
 
-      const staged = statusLine[0] || ' ';
-      const unstaged = statusLine[1] || ' ';
-      const isUntracked = statusLine === '??';
-      
-      i++;
-      if (i >= parts.length) break;
-      
-      const path = parts[i];
-      if (!path) {
-        i++;
-        continue;
-      }
+      const staged = part[0] || ' ';
+      const unstaged = part[1] || ' ';
+      const path = part.slice(3);
+
       let origPath: string | undefined;
-
-      // Check for rename (R or C in first column)
-      if (staged === 'R' || staged === 'C') {
+      if ((staged === 'R' || unstaged === 'R' || staged === 'C' || unstaged === 'C')) {
         i++;
-        if (i < parts.length) {
+        if (i < parts.length && parts[i] && parts[i].length > 0) {
           origPath = parts[i];
         }
       }
 
+      const isUntracked = staged === '?' && unstaged === '?';
       entries.push({
         staged,
         unstaged,
         path: Buffer.from(path),
         origPath: origPath ? Buffer.from(origPath) : undefined,
-        isUntracked
+        isUntracked,
       });
 
       if (isUntracked) {
         untracked++;
-      } else {
+      } else if (staged !== ' ' || unstaged !== ' ') {
         uncommittedTracked++;
       }
 
@@ -313,205 +264,315 @@ export class GitCli {
     return { uncommittedTracked, untracked, entries };
   }
 
-  /**
-   * List all worktrees
-   */
+  // ── Staging / commit ──
+
+  async addAll(worktreePath: string): Promise<void> {
+    await this.git(worktreePath, this.applyDefaultExcludes(['add', '-A']));
+  }
+
+  async commit(worktreePath: string, message: string): Promise<void> {
+    await this.git(worktreePath, ['commit', '-m', message]);
+  }
+
+  async hasStagedChanges(repoPath: string): Promise<boolean> {
+    const gitExe = resolveExecutablePathBlocking('git');
+    if (!gitExe) throw GitCliError.notAvailable();
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(gitExe, ['-C', repoPath, 'diff', '--cached', '--quiet'], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      let stderr = '';
+      if (child.stderr) child.stderr.on('data', d => { stderr += d.toString(); });
+      child.on('error', e => reject(GitCliError.commandFailed(e.message)));
+      child.on('close', code => {
+        if (code === 0) resolve(false);
+        else if (code === 1) resolve(true);
+        else reject(GitCliError.commandFailed(stderr.trim()));
+      });
+    });
+  }
+
+  // ── Worktree listing ──
+
   async listWorktrees(repoPath: string): Promise<WorktreeEntry[]> {
     const out = await this.git(repoPath, ['worktree', 'list', '--porcelain']);
-    const worktrees: WorktreeEntry[] = [];
-    
+    const entries: WorktreeEntry[] = [];
+
     let currentPath: string | undefined;
+    let currentHead: string | undefined;
     let currentBranch: string | undefined;
-    
+
     for (const line of out.split('\n')) {
-      if (line.startsWith('worktree ')) {
-        if (currentPath) {
-          worktrees.push({ path: currentPath, branch: currentBranch });
+      const trimmed = line.trim();
+
+      if (trimmed.length === 0) {
+        if (currentPath && currentHead) {
+          entries.push({ path: currentPath, branch: currentBranch });
         }
-        currentPath = line.substring(9);
+        currentPath = undefined;
+        currentHead = undefined;
         currentBranch = undefined;
-      } else if (line.startsWith('branch ')) {
-        currentBranch = line.substring(7);
+      } else if (trimmed.startsWith('worktree ')) {
+        currentPath = trimmed.substring(9);
+      } else if (trimmed.startsWith('HEAD ')) {
+        currentHead = trimmed.substring(5);
+      } else if (trimmed.startsWith('branch ')) {
+        const branchRef = trimmed.substring(7);
+        currentBranch = branchRef.startsWith('refs/heads/')
+          ? branchRef.substring(11)
+          : branchRef;
       }
     }
-    
-    if (currentPath) {
-      worktrees.push({ path: currentPath, branch: currentBranch });
+
+    // Handle last entry if no trailing empty line
+    if (currentPath && currentHead) {
+      entries.push({ path: currentPath, branch: currentBranch });
     }
-    
-    return worktrees;
+
+    return entries;
   }
 
-  /**
-   * List remotes
-   */
+  // ── Remote operations ──
+
   async listRemotes(repoPath: string): Promise<Array<[string, string]>> {
     const out = await this.git(repoPath, ['remote', '-v']);
-    const remotes = new Map<string, string>();
-    
+    const seen = new Set<string>();
+    const remotes: Array<[string, string]> = [];
+
     for (const line of out.split('\n')) {
-      const parts = line.split(/\s+/);
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      const parts = trimmed.split('\t');
       if (parts.length >= 2) {
         const name = parts[0];
-        const url = parts[1];
-        if (name && url && !remotes.has(name)) {
-          remotes.set(name, url);
+        let url = parts[1];
+        // Remove " (fetch)" or " (push)" suffix
+        url = url.replace(/ \((fetch|push)\)$/, '');
+        if (name && url && !seen.has(name)) {
+          seen.add(name);
+          remotes.push([name, url]);
         }
       }
     }
-    
-    return Array.from(remotes.entries());
+
+    return remotes;
   }
 
-  /**
-   * Stage files
-   */
-  async add(repoPath: string, paths: string[]): Promise<void> {
-    if (paths.length === 0) return;
-    await this.git(repoPath, ['add', ...paths]);
+  async getRemoteUrl(repoPath: string, remoteName: string): Promise<string> {
+    const output = await this.git(repoPath, ['remote', 'get-url', remoteName]);
+    return output.trim();
   }
 
-  /**
-   * Commit changes
-   */
-  async commit(repoPath: string, message: string): Promise<void> {
-    await this.ensureCliCommitIdentity(repoPath);
-    await this.git(repoPath, ['commit', '-m', message]);
-  }
-
-  /**
-   * Push to remote
-   */
-  async push(repoPath: string, remote: string, branch: string, force: boolean = false): Promise<void> {
-    const args = ['push', remote, branch];
-    if (force) {
-      args.push('--force');
+  async fetchWithRefspec(
+    repoPath: string,
+    remoteUrl: string,
+    refspec: string
+  ): Promise<void> {
+    const envs: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
+    try {
+      await this.gitWithEnv(repoPath, ['fetch', remoteUrl, refspec], envs);
+    } catch (err) {
+      if (err instanceof GitCliError) {
+        throw this.classifyCliError(err.message);
+      }
+      throw err;
     }
-    await this.git(repoPath, args);
   }
 
-  /**
-   * Fetch from remote
-   */
-  async fetch(repoPath: string, remote: string, refspec?: string): Promise<void> {
-    const args = ['fetch', remote];
-    if (refspec) {
-      args.push(refspec);
+  async push(
+    repoPath: string,
+    remoteUrl: string,
+    branch: string,
+    force: boolean = false
+  ): Promise<void> {
+    const refspec = force
+      ? `+refs/heads/${branch}:refs/heads/${branch}`
+      : `refs/heads/${branch}:refs/heads/${branch}`;
+    const envs: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
+    try {
+      await this.gitWithEnv(repoPath, ['push', remoteUrl, refspec], envs);
+    } catch (err) {
+      if (err instanceof GitCliError) {
+        throw this.classifyCliError(err.message);
+      }
+      throw err;
     }
-    await this.git(repoPath, args);
   }
 
-  /**
-   * Checkout branch or commit
-   */
+  async checkRemoteBranchExists(
+    repoPath: string,
+    remoteUrl: string,
+    branchName: string
+  ): Promise<boolean> {
+    const envs: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
+    try {
+      const output = await this.gitWithEnv(
+        repoPath,
+        ['ls-remote', '--heads', remoteUrl, `refs/heads/${branchName}`],
+        envs
+      );
+      return output.trim().length > 0;
+    } catch (err) {
+      if (err instanceof GitCliError) {
+        throw this.classifyCliError(err.message);
+      }
+      throw err;
+    }
+  }
+
+  // ── Branch operations ──
+
   async checkout(repoPath: string, ref: string): Promise<void> {
     await this.git(repoPath, ['checkout', ref]);
   }
 
-  /**
-   * Create a new branch
-   */
   async createBranch(repoPath: string, branchName: string, startPoint?: string): Promise<void> {
     const args = ['branch', branchName];
-    if (startPoint) {
-      args.push(startPoint);
-    }
+    if (startPoint) args.push(startPoint);
     await this.git(repoPath, args);
   }
 
-  /**
-   * Delete a branch
-   */
   async deleteBranch(repoPath: string, branchName: string, force: boolean = false): Promise<void> {
     const flag = force ? '-D' : '-d';
     await this.git(repoPath, ['branch', flag, branchName]);
   }
 
-  /**
-   * Merge a branch
-   */
   async merge(repoPath: string, branch: string, noFf: boolean = false): Promise<void> {
     const args = ['merge', branch];
-    if (noFf) {
-      args.push('--no-ff');
-    }
+    if (noFf) args.push('--no-ff');
     await this.git(repoPath, args);
   }
 
-  /**
-   * Rebase onto a branch
-   */
-  async rebase(repoPath: string, upstream: string): Promise<void> {
-    await this.git(repoPath, ['rebase', upstream]);
-  }
+  // ── Merge-base / rebase ──
 
-  /**
-   * Abort an in-progress rebase
-   */
-  async rebaseAbort(repoPath: string): Promise<void> {
-    await this.git(repoPath, ['rebase', '--abort']);
-  }
-
-  /**
-   * Continue a rebase after resolving conflicts
-   */
-  async rebaseContinue(repoPath: string): Promise<void> {
-    await this.git(repoPath, ['rebase', '--continue']);
-  }
-
-  // Private helper methods
-
-  private async ensureAvailable(): Promise<void> {
+  async mergeBase(worktreePath: string, a: string, b: string): Promise<string> {
     try {
-      await this.runCommand('git', ['--version']);
+      const out = await this.git(worktreePath, ['merge-base', '--fork-point', a, b]);
+      return out.trim();
     } catch {
-      throw GitCliError.notAvailable();
+      const out = await this.git(worktreePath, ['merge-base', a, b]);
+      return out.trim();
     }
   }
 
-  private async ensureCliCommitIdentity(repoPath: string): Promise<void> {
+  async rebaseOnto(
+    worktreePath: string,
+    newBase: string,
+    oldBase: string,
+    taskBranch: string
+  ): Promise<void> {
+    if (await this.isRebaseInProgress(worktreePath)) {
+      throw GitCliError.rebaseInProgress();
+    }
+
+    let mergeBaseOid: string;
     try {
-      await this.git(repoPath, ['config', 'user.name']);
-      await this.git(repoPath, ['config', 'user.email']);
+      mergeBaseOid = await this.mergeBase(worktreePath, oldBase, taskBranch);
     } catch {
-      // Set default identity if missing
-      await this.git(repoPath, ['config', 'user.name', 'Vibe Kanban']);
-      await this.git(repoPath, ['config', 'user.email', 'noreply@vibekanban.com']);
+      mergeBaseOid = oldBase;
+    }
+
+    await this.git(worktreePath, ['rebase', '--onto', newBase, mergeBaseOid, taskBranch]);
+  }
+
+  // ── Conflict detection ──
+
+  async isRebaseInProgress(worktreePath: string): Promise<boolean> {
+    const rebaseMerge = await this.git(worktreePath, ['rev-parse', '--git-path', 'rebase-merge']);
+    const rebaseApply = await this.git(worktreePath, ['rev-parse', '--git-path', 'rebase-apply']);
+    return existsSync(rebaseMerge.trim()) || existsSync(rebaseApply.trim());
+  }
+
+  async isMergeInProgress(worktreePath: string): Promise<boolean> {
+    try {
+      await this.git(worktreePath, ['rev-parse', '--verify', 'MERGE_HEAD']);
+      return true;
+    } catch (err) {
+      if (err instanceof GitCliError && err.code === 'COMMAND_FAILED') return false;
+      throw err;
     }
   }
 
-  private async runCommand(cmd: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(cmd, args, { stdio: 'pipe' });
-      
-      let stdout = '';
-      let stderr = '';
-      
-      if (child.stdout) {
-        child.stdout.on('data', (data) => {
-          stdout += data.toString();
-        });
-      }
-      
-      if (child.stderr) {
-        child.stderr.on('data', (data) => {
-          stderr += data.toString();
-        });
-      }
-      
-      child.on('error', (error) => {
-        reject(new Error(error.message));
-      });
-      
-      child.on('close', (code) => {
-        if (code !== 0) {
-          reject(new Error(stderr || `Command failed with code ${code}`));
-        } else {
-          resolve(stdout);
-        }
-      });
-    });
+  async isCherryPickInProgress(worktreePath: string): Promise<boolean> {
+    try {
+      await this.git(worktreePath, ['rev-parse', '--verify', 'CHERRY_PICK_HEAD']);
+      return true;
+    } catch (err) {
+      if (err instanceof GitCliError && err.code === 'COMMAND_FAILED') return false;
+      throw err;
+    }
   }
+
+  async isRevertInProgress(worktreePath: string): Promise<boolean> {
+    try {
+      await this.git(worktreePath, ['rev-parse', '--verify', 'REVERT_HEAD']);
+      return true;
+    } catch (err) {
+      if (err instanceof GitCliError && err.code === 'COMMAND_FAILED') return false;
+      throw err;
+    }
+  }
+
+  // ── Conflict resolution ──
+
+  async abortRebase(worktreePath: string): Promise<void> {
+    if (!(await this.isRebaseInProgress(worktreePath))) return;
+    await this.git(worktreePath, ['rebase', '--abort']);
+  }
+
+  async quitRebase(worktreePath: string): Promise<void> {
+    if (!(await this.isRebaseInProgress(worktreePath))) return;
+    await this.git(worktreePath, ['rebase', '--quit']);
+  }
+
+  async continueRebase(worktreePath: string): Promise<void> {
+    if (!(await this.isRebaseInProgress(worktreePath))) {
+      throw GitCliError.commandFailed('No rebase in progress');
+    }
+    await this.git(worktreePath, ['rebase', '--continue']);
+  }
+
+  async abortMerge(worktreePath: string): Promise<void> {
+    if (!(await this.isMergeInProgress(worktreePath))) return;
+    await this.git(worktreePath, ['merge', '--abort']);
+  }
+
+  async abortCherryPick(worktreePath: string): Promise<void> {
+    if (!(await this.isCherryPickInProgress(worktreePath))) return;
+    await this.git(worktreePath, ['cherry-pick', '--abort']);
+  }
+
+  async abortRevert(worktreePath: string): Promise<void> {
+    if (!(await this.isRevertInProgress(worktreePath))) return;
+    await this.git(worktreePath, ['revert', '--abort']);
+  }
+
+  async getConflictedFiles(worktreePath: string): Promise<string[]> {
+    const out = await this.git(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
+    return out.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  }
+
+  // ── Squash merge / ref update ──
+
+  async mergeSquashCommit(
+    repoPath: string,
+    baseBranch: string,
+    fromBranch: string,
+    message: string
+  ): Promise<string> {
+    await this.git(repoPath, ['checkout', baseBranch]);
+    await this.git(repoPath, ['merge', '--squash', '--no-commit', fromBranch]);
+    await this.git(repoPath, ['commit', '-m', message]);
+    const sha = await this.git(repoPath, ['rev-parse', 'HEAD']);
+    return sha.trim();
+  }
+
+  async updateRef(repoPath: string, refname: string, sha: string): Promise<void> {
+    await this.git(repoPath, ['update-ref', refname, sha]);
+  }
+
+  // ── Low-level runners ──
 
   async git(repoPath: string, args: string[]): Promise<string> {
     return this.gitImpl(repoPath, args, {}, undefined);
@@ -534,46 +595,66 @@ export class GitCli {
     return this.gitImpl(repoPath, args, envs, stdin);
   }
 
+  // ── Private methods ──
+
+  private async ensureAvailable(): Promise<void> {
+    const gitExe = resolveExecutablePathBlocking('git');
+    if (!gitExe) throw GitCliError.notAvailable();
+    try {
+      await this.runCommand(gitExe, ['--version']);
+    } catch {
+      throw GitCliError.notAvailable();
+    }
+  }
+
+  private async runCommand(cmd: string, args: string[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      if (child.stdout) child.stdout.on('data', d => { stdout += d.toString(); });
+      if (child.stderr) child.stderr.on('data', d => { stderr += d.toString(); });
+      child.on('error', e => reject(new Error(e.message)));
+      child.on('close', code => {
+        if (code !== 0) reject(new Error(stderr || `Command failed with code ${code}`));
+        else resolve(stdout);
+      });
+    });
+  }
+
   private async gitImpl(
     repoPath: string,
     args: string[],
     envs: Record<string, string>,
     stdin?: Buffer
   ): Promise<string> {
+    const gitExe = resolveExecutablePathBlocking('git');
+    if (!gitExe) throw GitCliError.notAvailable();
+
     return new Promise((resolve, reject) => {
-      const child = spawn('git', ['-C', repoPath, ...args], {
+      const child = spawn(gitExe, ['-C', repoPath, ...args], {
         env: { ...process.env, ...envs },
-        stdio: stdin ? 'pipe' : 'inherit'
+        stdio: ['pipe', 'pipe', 'pipe']
       });
 
       let stdout = '';
       let stderr = '';
 
-      if (child.stdout) {
-        child.stdout.on('data', (data) => {
-          stdout += data.toString();
-        });
-      }
-
-      if (child.stderr) {
-        child.stderr.on('data', (data) => {
-          stderr += data.toString();
-        });
-      }
+      if (child.stdout) child.stdout.on('data', d => { stdout += d.toString(); });
+      if (child.stderr) child.stderr.on('data', d => { stderr += d.toString(); });
 
       if (stdin && child.stdin) {
         child.stdin.write(stdin);
         child.stdin.end();
+      } else if (child.stdin) {
+        child.stdin.end();
       }
 
-      child.on('error', (error) => {
-        reject(GitCliError.commandFailed(error.message));
-      });
-
-      child.on('close', (code) => {
+      child.on('error', e => reject(GitCliError.commandFailed(e.message)));
+      child.on('close', code => {
         if (code !== 0) {
-          const msg = stderr || stdout || `Command failed with code ${code}`;
-          reject(this.classifyCliError(msg));
+          const combined = stderr || stdout || `Command failed with code ${code}`;
+          reject(this.classifyCliError(combined));
         } else {
           resolve(stdout);
         }
@@ -583,63 +664,44 @@ export class GitCli {
 
   private classifyCliError(msg: string): GitCliError {
     const lower = msg.toLowerCase();
-    
     if (lower.includes('authentication failed') ||
         lower.includes('could not read username') ||
         lower.includes('invalid username or password')) {
       return GitCliError.authFailed(msg);
     }
-    
     if (lower.includes('non-fast-forward') ||
         lower.includes('failed to push some refs') ||
         lower.includes('fetch first') ||
         lower.includes('updates were rejected because the tip')) {
       return GitCliError.pushRejected(msg);
     }
-    
     return GitCliError.commandFailed(msg);
   }
 
-  private parseDiffStatus(output: string): StatusDiffEntry[] {
+  private parseNameStatus(output: string): StatusDiffEntry[] {
     const entries: StatusDiffEntry[] = [];
-    const parts = output.split('\0').filter(p => p.length > 0);
-    
-    let i = 0;
-    while (i < parts.length) {
-      const statusCode = parts[i];
-      if (!statusCode || statusCode.length === 0) {
-        i++;
-        continue;
-      }
+    for (const line of output.split('\n')) {
+      const trimmed = line.trimEnd();
+      if (trimmed.length === 0) continue;
 
-      const changeType = this.parseChangeType(statusCode[0] || 'X');
-      i++;
-      
-      if (i >= parts.length) break;
-      const path = parts[i];
-      if (!path) {
-        i++;
-        continue;
-      }
-      let oldPath: string | undefined;
+      const parts = trimmed.split('\t');
+      const code = parts[0] || '';
+      const change = this.parseChangeType(code.charAt(0));
 
-      // Handle renames and copies (two paths)
-      if (statusCode[0] === 'R' || statusCode[0] === 'C') {
-        i++;
-        if (i < parts.length) {
-          oldPath = path;
-          const newPath = parts[i];
-          if (newPath) {
-            entries.push({ change: changeType, path: newPath, oldPath });
-          }
+      if (change === ChangeType.Renamed || change === ChangeType.Copied) {
+        if (parts.length >= 3) {
+          entries.push({
+            change,
+            path: parts[2],
+            oldPath: parts[1],
+          });
         }
       } else {
-        entries.push({ change: changeType, path, oldPath });
+        if (parts.length >= 2) {
+          entries.push({ change, path: parts[1], oldPath: undefined });
+        }
       }
-
-      i++;
     }
-
     return entries;
   }
 
@@ -654,6 +716,31 @@ export class GitCli {
       case 'U': return ChangeType.Unmerged;
       default: return ChangeType.Unknown;
     }
+  }
+
+  private applyDefaultExcludes(args: string[]): string[] {
+    return this.applyPathspecFilter(args, undefined);
+  }
+
+  private applyPathspecFilter(args: string[], pathspecs?: string[]): string[] {
+    const filters = this.buildPathspecFilter(pathspecs);
+    if (filters.length > 0) {
+      return [...args, '--', ...filters];
+    }
+    return args;
+  }
+
+  private buildPathspecFilter(pathspecs?: string[]): string[] {
+    const filters: string[] = [];
+    filters.push(...this.getDefaultPathspecExcludes());
+    if (pathspecs) {
+      for (const p of pathspecs) {
+        if (p.trim().length > 0) {
+          filters.push(p);
+        }
+      }
+    }
+    return filters;
   }
 
   private getDefaultPathspecExcludes(): string[] {

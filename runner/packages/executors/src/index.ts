@@ -17,6 +17,7 @@
  */
 
 export * from './types.js';
+export * from './command.js';
 export * from './base.js';
 export * from './claude.js';
 export * from './cursor.js';
