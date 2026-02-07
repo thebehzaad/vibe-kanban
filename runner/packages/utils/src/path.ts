@@ -31,13 +31,6 @@ export function expandTilde(filepath: string): string {
 }
 
 /**
- * Normalize path to use forward slashes
- */
-export function normalizePath(filepath: string): string {
-  return path.normalize(filepath).replace(/\\/g, '/');
-}
-
-/**
  * Normalize macOS prefix /private/var/ and /private/tmp/ to their public aliases
  */
 export function normalizeMacosPrivateAlias(p: string): string {
@@ -136,38 +129,4 @@ export function getCacheDir(): string {
     const xdgCache = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
     return path.join(xdgCache, appName);
   }
-}
-
-/**
- * Get the data directory for the application
- */
-export function getDataDir(): string {
-  const appName = process.env.NODE_ENV === 'development' ? 'vibe-kanban-dev' : 'vibe-kanban';
-
-  if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', appName);
-  } else if (process.platform === 'win32') {
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), appName);
-  } else {
-    // Linux: respect XDG_DATA_HOME
-    const xdgData = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-    return path.join(xdgData, appName);
-  }
-}
-
-/**
- * Ensure a directory exists
- */
-export function ensureDir(dirPath: string): void {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
-  }
-}
-
-/**
- * Check if a path is within another path
- */
-export function isPathWithin(childPath: string, parentPath: string): boolean {
-  const relative = path.relative(parentPath, childPath);
-  return !relative.startsWith('..') && !path.isAbsolute(relative);
 }

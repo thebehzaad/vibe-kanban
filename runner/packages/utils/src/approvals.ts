@@ -1,38 +1,54 @@
 /**
  * Approval utilities
  * Translates: crates/utils/src/approvals.rs
- *
- * Utilities for handling user approvals and confirmations.
  */
 
-export enum ApprovalType {
-  Command = 'command',
-  FileOperation = 'file_operation',
-  NetworkRequest = 'network_request',
-  SystemChange = 'system_change'
-}
+import { randomUUID } from 'node:crypto';
+
+export const APPROVAL_TIMEOUT_SECONDS = 36000; // 10 hours
 
 export interface ApprovalRequest {
   id: string;
-  type: ApprovalType;
-  message: string;
-  details?: Record<string, unknown>;
-  timeout?: number;
+  toolName: string;
+  toolInput: unknown;
+  toolCallId: string;
+  executionProcessId: string;
+  createdAt: string;
+  timeoutAt: string;
 }
+
+export interface CreateApprovalRequest {
+  toolName: string;
+  toolInput: unknown;
+  toolCallId: string;
+}
+
+/** Tagged union matching Rust: #[serde(tag = "status", rename_all = "snake_case")] */
+export type ApprovalStatus =
+  | { status: 'pending' }
+  | { status: 'approved' }
+  | { status: 'denied'; reason?: string }
+  | { status: 'timed_out' };
 
 export interface ApprovalResponse {
-  approved: boolean;
-  timestamp: string;
-  reason?: string;
+  executionProcessId: string;
+  status: ApprovalStatus;
 }
 
-export class ApprovalManager {
-  // TODO: Implement approval management
-  async requestApproval(request: ApprovalRequest): Promise<ApprovalResponse> {
-    throw new Error('Not implemented');
-  }
-
-  async cancelApproval(id: string): Promise<void> {
-    throw new Error('Not implemented');
-  }
+/** Matches Rust: ApprovalRequest::from_create() */
+export function createApprovalRequest(
+  request: CreateApprovalRequest,
+  executionProcessId: string,
+): ApprovalRequest {
+  const now = new Date();
+  const timeoutAt = new Date(now.getTime() + APPROVAL_TIMEOUT_SECONDS * 1000);
+  return {
+    id: randomUUID(),
+    toolName: request.toolName,
+    toolInput: request.toolInput,
+    toolCallId: request.toolCallId,
+    executionProcessId,
+    createdAt: now.toISOString(),
+    timeoutAt: timeoutAt.toISOString(),
+  };
 }

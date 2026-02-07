@@ -1,28 +1,45 @@
 /**
  * Migration API types
  * Translates: crates/utils/src/api/migration.rs
- *
- * API types for migration operations.
  */
 
-export interface MigrationRequest {
-  sourceFormat: 'json' | 'sqlite' | 'postgres';
-  data: unknown;
+export interface MigrateProjectRequest {
+  organizationId: string;
+  name: string;
+  color: string;
+  createdAt: string;
 }
 
-export interface MigrationResponse {
-  success: boolean;
-  itemsImported: number;
-  errors: string[];
+export interface MigrateIssueRequest {
+  projectId: string;
+  statusName: string;
+  title: string;
+  description?: string;
+  createdAt: string;
 }
 
-export interface ExportRequest {
-  format: 'json' | 'sqlite';
-  includeImages?: boolean;
+export interface MigratePullRequestRequest {
+  url: string;
+  number: number;
+  status: string;
+  mergedAt?: string;
+  mergeCommitSha?: string;
+  targetBranchName: string;
+  issueId: string;
 }
 
-export interface ExportResponse {
-  data: unknown;
-  format: string;
-  timestamp: string;
+export interface MigrateWorkspaceRequest {
+  projectId: string;
+  issueId?: string;
+  localWorkspaceId: string;
+  archived: boolean;
+  createdAt: string;
+}
+
+export interface BulkMigrateRequest<T> {
+  items: T[];
+}
+
+export interface BulkMigrateResponse {
+  ids: string[];
 }

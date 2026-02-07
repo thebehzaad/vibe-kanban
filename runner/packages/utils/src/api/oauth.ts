@@ -1,40 +1,61 @@
 /**
  * OAuth API types
  * Translates: crates/utils/src/api/oauth.rs
- *
- * API types for OAuth authentication.
  */
 
-export interface OAuthProvider {
-  name: string;
-  authUrl: string;
-  tokenUrl: string;
-  clientId: string;
-  scope: string[];
+export interface HandoffInitRequest {
+  provider: string;
+  returnTo: string;
+  appChallenge: string;
 }
 
-export interface OAuthTokenRequest {
-  code: string;
-  redirectUri: string;
-  codeVerifier?: string;
+export interface HandoffInitResponse {
+  handoffId: string;
+  authorizeUrl: string;
 }
 
-export interface OAuthTokenResponse {
+export interface HandoffRedeemRequest {
+  handoffId: string;
+  appCode: string;
+  appVerifier: string;
+}
+
+export interface HandoffRedeemResponse {
   accessToken: string;
-  refreshToken?: string;
-  expiresIn: number;
-  tokenType: string;
-  scope?: string[];
-}
-
-export interface OAuthRefreshRequest {
   refreshToken: string;
 }
 
-export interface OAuthUserInfo {
-  id: string;
-  email: string;
-  name?: string;
-  avatarUrl?: string;
-  provider: string;
+export interface TokenRefreshRequest {
+  refreshToken: string;
 }
+
+export interface TokenRefreshResponse {
+  accessToken: string;
+  refreshToken: string;
+}
+
+export interface ProviderProfile {
+  provider: string;
+  username?: string;
+  displayName?: string;
+  email?: string;
+  avatarUrl?: string;
+}
+
+export interface ProfileResponse {
+  userId: string;
+  username?: string;
+  email: string;
+  providers: ProviderProfile[];
+}
+
+export interface StatusResponse {
+  loggedIn: boolean;
+  profile?: ProfileResponse;
+  degraded?: boolean;
+}
+
+/** Tagged union matching Rust: #[serde(tag = "status", rename_all = "lowercase")] */
+export type LoginStatus =
+  | { status: 'loggedout' }
+  | { status: 'loggedin'; profile: ProfileResponse };
