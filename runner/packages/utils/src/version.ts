@@ -27,7 +27,7 @@ export function getAppVersion(): string {
       if (fs.existsSync(packagePath)) {
         const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
         if (packageJson.version) {
-          cachedVersion = packageJson.version;
+          cachedVersion = packageJson.version as string;
           return cachedVersion;
         }
       }

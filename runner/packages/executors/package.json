@@ -19,7 +19,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@runner/db": "workspace:*",
+    "@runner/git": "workspace:*",
     "@runner/utils": "workspace:*"
   },
   "devDependencies": {

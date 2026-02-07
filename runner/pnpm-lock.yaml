@@ -57,6 +57,19 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/git:
+    dependencies:
+      '@runner/utils':
+        specifier: workspace:*
+        version: link:../utils
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.19.9
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/local-deployment:
     dependencies:
       '@runner/db':
@@ -163,6 +176,9 @@ importers:
 
   packages/utils:
     devDependencies:
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.19.9
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

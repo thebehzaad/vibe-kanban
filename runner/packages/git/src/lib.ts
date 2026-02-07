@@ -909,7 +909,9 @@ export class GitService {
       // Fall through to first remote
     }
 
-    return { name: remotes[0][0], url: remotes[0][1] };
+    const first = remotes[0];
+    if (!first) throw GitServiceError.invalidRepository('No remotes configured');
+    return { name: first[0], url: first[1] };
   }
 
   private async findCheckoutPathForBranch(
@@ -1137,10 +1139,17 @@ export class GitService {
         case 'U': change = ChangeType.Unmerged; break;
         default: change = ChangeType.Unknown;
       }
-      if ((change === ChangeType.Renamed || change === ChangeType.Copied) && parts.length >= 3) {
-        entries.push({ change, path: parts[2], oldPath: parts[1] });
-      } else if (parts.length >= 2) {
-        entries.push({ change, path: parts[1], oldPath: undefined });
+      if ((change === ChangeType.Renamed || change === ChangeType.Copied)) {
+        const oldP = parts[1];
+        const newP = parts[2];
+        if (oldP && newP) {
+          entries.push({ change, path: newP, oldPath: oldP });
+        }
+      } else {
+        const p = parts[1];
+        if (p) {
+          entries.push({ change, path: p, oldPath: undefined });
+        }
       }
     }
     return entries;

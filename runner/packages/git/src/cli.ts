@@ -238,8 +238,9 @@ export class GitCli {
       let origPath: string | undefined;
       if ((staged === 'R' || unstaged === 'R' || staged === 'C' || unstaged === 'C')) {
         i++;
-        if (i < parts.length && parts[i] && parts[i].length > 0) {
-          origPath = parts[i];
+        const origPart = parts[i];
+        if (i < parts.length && origPart && origPart.length > 0) {
+          origPath = origPart;
         }
       }
 
@@ -346,9 +347,10 @@ export class GitCli {
       const parts = trimmed.split('\t');
       if (parts.length >= 2) {
         const name = parts[0];
-        let url = parts[1];
+        const rawUrl = parts[1];
+        if (!name || !rawUrl) continue;
         // Remove " (fetch)" or " (push)" suffix
-        url = url.replace(/ \((fetch|push)\)$/, '');
+        const url = rawUrl.replace(/ \((fetch|push)\)$/, '');
         if (name && url && !seen.has(name)) {
           seen.add(name);
           remotes.push([name, url]);
@@ -689,16 +691,15 @@ export class GitCli {
       const change = this.parseChangeType(code.charAt(0));
 
       if (change === ChangeType.Renamed || change === ChangeType.Copied) {
-        if (parts.length >= 3) {
-          entries.push({
-            change,
-            path: parts[2],
-            oldPath: parts[1],
-          });
+        const oldP = parts[1];
+        const newP = parts[2];
+        if (oldP && newP) {
+          entries.push({ change, path: newP, oldPath: oldP });
         }
       } else {
-        if (parts.length >= 2) {
-          entries.push({ change, path: parts[1], oldPath: undefined });
+        const p = parts[1];
+        if (p) {
+          entries.push({ change, path: p, oldPath: undefined });
         }
       }
     }
