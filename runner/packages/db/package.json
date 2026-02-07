@@ -1,0 +1,29 @@
+{
+  "name": "@runner/db",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Database abstraction layer - TypeScript translation of crates/db",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --build --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.15.0"
+  }
+}
