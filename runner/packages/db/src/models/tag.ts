@@ -3,43 +3,35 @@
  * Translates: crates/db/src/models/tag.rs
  */
 
-import * as crypto from 'node:crypto';
-import type { DBService } from '../connection.js';
+import { randomUUID } from 'node:crypto';
+import type { DatabaseType } from '../connection.js';
+
+// --- Types ---
 
 export interface Tag {
   id: string;
-  name: string;
-  color: string;
-  description?: string;
+  tagName: string;
+  content: string;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface CreateTag {
-  name: string;
-  color: string;
-  description?: string;
+  tagName: string;
+  content: string;
 }
 
 export interface UpdateTag {
-  name?: string;
-  color?: string;
-  description?: string;
+  tagName?: string;
+  content?: string;
 }
 
-export interface TagAssignment {
-  id: string;
-  tagId: string;
-  entityType: string;
-  entityId: string;
-  createdAt: string;
-}
+// --- Row mapping ---
 
 interface TagRow {
   id: string;
-  name: string;
-  color: string;
-  description: string | null;
+  tag_name: string;
+  content: string;
   created_at: string;
   updated_at: string;
 }
@@ -47,48 +39,31 @@ interface TagRow {
 function rowToTag(row: TagRow): Tag {
   return {
     id: row.id,
-    name: row.name,
-    color: row.color,
-    description: row.description ?? undefined,
+    tagName: row.tag_name,
+    content: row.content,
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
   };
 }
 
+// --- Repository ---
+
 export class TagRepository {
-  constructor(private db: DBService) {}
+  constructor(private db: DatabaseType) {}
 
-  /**
-   * Find all tags
-   */
-  findAll(search?: string): Tag[] {
-    let rows: TagRow[];
-
-    if (search) {
-      const searchLower = `%${search.toLowerCase()}%`;
-      rows = this.db.database.prepare(`
-        SELECT id, name, color, description, created_at, updated_at
-        FROM tags
-        WHERE LOWER(name) LIKE ? OR LOWER(description) LIKE ?
-        ORDER BY name ASC
-      `).all(searchLower, searchLower) as TagRow[];
-    } else {
-      rows = this.db.database.prepare(`
-        SELECT id, name, color, description, created_at, updated_at
-        FROM tags
-        ORDER BY name ASC
-      `).all() as TagRow[];
-    }
+  findAll(): Tag[] {
+    const rows = this.db.prepare(`
+      SELECT id, tag_name, content, created_at, updated_at
+      FROM tags
+      ORDER BY tag_name ASC
+    `).all() as TagRow[];
 
     return rows.map(rowToTag);
   }
 
-  /**
-   * Find tag by ID
-   */
   findById(id: string): Tag | undefined {
-    const row = this.db.database.prepare(`
-      SELECT id, name, color, description, created_at, updated_at
+    const row = this.db.prepare(`
+      SELECT id, tag_name, content, created_at, updated_at
       FROM tags
       WHERE id = ?
     `).get(id) as TagRow | undefined;
@@ -96,99 +71,37 @@ export class TagRepository {
     return row ? rowToTag(row) : undefined;
   }
 
-  /**
-   * Find tag by name
-   */
-  findByName(name: string): Tag | undefined {
-    const row = this.db.database.prepare(`
-      SELECT id, name, color, description, created_at, updated_at
-      FROM tags
-      WHERE LOWER(name) = LOWER(?)
-    `).get(name) as TagRow | undefined;
-
-    return row ? rowToTag(row) : undefined;
-  }
-
-  /**
-   * Create a new tag
-   */
-  create(data: CreateTag, tagId?: string): Tag {
-    const id = tagId ?? crypto.randomUUID();
-    const now = new Date().toISOString();
-
-    this.db.database.prepare(`
-      INSERT INTO tags (id, name, color, description, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, data.name, data.color, data.description ?? null, now, now);
+  create(data: CreateTag): Tag {
+    const id = randomUUID();
+    this.db.prepare(`
+      INSERT INTO tags (id, tag_name, content)
+      VALUES (?, ?, ?)
+    `).run(id, data.tagName, data.content);
 
     return this.findById(id)!;
   }
 
-  /**
-   * Update a tag
-   */
   update(id: string, data: UpdateTag): Tag | undefined {
     const existing = this.findById(id);
     if (!existing) return undefined;
 
-    const name = data.name ?? existing.name;
-    const color = data.color ?? existing.color;
-    const description = data.description ?? existing.description;
+    const tagName = data.tagName ?? existing.tagName;
+    const content = data.content ?? existing.content;
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
-      UPDATE tags SET name = ?, color = ?, description = ?, updated_at = ?
+    this.db.prepare(`
+      UPDATE tags
+      SET tag_name = ?, content = ?, updated_at = ?
       WHERE id = ?
-    `).run(name, color, description ?? null, now, id);
+    `).run(tagName, content, now, id);
 
     return this.findById(id);
   }
 
-  /**
-   * Delete a tag
-   */
   delete(id: string): number {
-    const result = this.db.database.prepare(
-      'DELETE FROM tags WHERE id = ?'
+    const result = this.db.prepare(
+      'DELETE FROM tags WHERE id = ?',
     ).run(id);
     return result.changes;
-  }
-
-  /**
-   * Assign tag to entity
-   */
-  assignToEntity(tagId: string, entityType: string, entityId: string): void {
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
-
-    this.db.database.prepare(`
-      INSERT OR IGNORE INTO tag_assignments (id, tag_id, entity_type, entity_id, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, tagId, entityType, entityId, now);
-  }
-
-  /**
-   * Remove tag from entity
-   */
-  removeFromEntity(tagId: string, entityType: string, entityId: string): void {
-    this.db.database.prepare(`
-      DELETE FROM tag_assignments
-      WHERE tag_id = ? AND entity_type = ? AND entity_id = ?
-    `).run(tagId, entityType, entityId);
-  }
-
-  /**
-   * Get tags for entity
-   */
-  getTagsForEntity(entityType: string, entityId: string): Tag[] {
-    const rows = this.db.database.prepare(`
-      SELECT t.id, t.name, t.color, t.description, t.created_at, t.updated_at
-      FROM tags t
-      JOIN tag_assignments ta ON t.id = ta.tag_id
-      WHERE ta.entity_type = ? AND ta.entity_id = ?
-      ORDER BY t.name ASC
-    `).all(entityType, entityId) as TagRow[];
-
-    return rows.map(rowToTag);
   }
 }

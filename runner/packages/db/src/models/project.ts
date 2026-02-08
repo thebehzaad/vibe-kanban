@@ -3,8 +3,9 @@
  * Translates: crates/db/src/models/project.rs
  */
 
-import * as crypto from 'node:crypto';
-import type { DBService } from '../connection.js';
+import { randomUUID } from 'node:crypto';
+import type { DatabaseType } from '../connection.js';
+import type { CreateProjectRepo } from './project-repo.js';
 
 export interface Project {
   id: string;

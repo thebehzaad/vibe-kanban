@@ -3,50 +3,21 @@
  * Translates: crates/db/src/lib.rs
  */
 
-import Database, { Database as DatabaseType, Statement } from 'better-sqlite3';
+import Database, { type Database as DatabaseType, type Statement } from 'better-sqlite3';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
+import { getAssetDir } from '@runner/utils';
 
 export interface DbConfig {
   /** Path to the SQLite database file. If not provided, uses default asset directory */
   dbPath?: string;
   /** Enable verbose logging */
   verbose?: boolean;
-  /** Enable WAL mode for better concurrency */
-  walMode?: boolean;
-}
-
-/**
- * Get the default asset directory for storing data files.
- * Mimics the Rust utils::assets::asset_dir() function.
- */
-export function getAssetDir(): string {
-  // Use platform-specific data directory
-  const platform = os.platform();
-  let baseDir: string;
-
-  if (platform === 'win32') {
-    baseDir = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-  } else if (platform === 'darwin') {
-    baseDir = path.join(os.homedir(), 'Library', 'Application Support');
-  } else {
-    baseDir = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-  }
-
-  const assetDir = path.join(baseDir, 'vibe-kanban');
-
-  // Ensure directory exists
-  if (!fs.existsSync(assetDir)) {
-    fs.mkdirSync(assetDir, { recursive: true });
-  }
-
-  return assetDir;
 }
 
 /**
  * Database service that wraps better-sqlite3
- * Provides the same interface as the Rust DBService
+ * Translates: pub struct DBService { pub pool: Pool<Sqlite> }
  */
 export class DBService {
   private db: DatabaseType;
@@ -59,6 +30,7 @@ export class DBService {
 
   /**
    * Create a new DBService instance
+   * Translates: pub async fn new() -> Result<DBService, Error>
    */
   static async create(config: DbConfig = {}): Promise<DBService> {
     const dbPath = config.dbPath ?? path.join(getAssetDir(), 'db.sqlite');
@@ -70,13 +42,11 @@ export class DBService {
     }
 
     const db = new Database(dbPath, {
-      verbose: config.verbose ? console.log : undefined
+      verbose: config.verbose ? console.log : undefined,
     });
 
-    // Enable WAL mode for better concurrency (similar to Rust's SqliteJournalMode)
-    if (config.walMode !== false) {
-      db.pragma('journal_mode = WAL');
-    }
+    // Rust uses SqliteJournalMode::Delete
+    db.pragma('journal_mode = DELETE');
 
     // Enable foreign keys
     db.pragma('foreign_keys = ON');
@@ -90,6 +60,19 @@ export class DBService {
   }
 
   /**
+   * Create a new DBService with an after-connect hook
+   * Translates: pub async fn new_with_after_connect<F>(after_connect: F) -> Result<DBService, Error>
+   */
+  static async createWithAfterConnect(
+    afterConnect: (db: DatabaseType) => void,
+    config: DbConfig = {},
+  ): Promise<DBService> {
+    const service = await DBService.create(config);
+    afterConnect(service.db);
+    return service;
+  }
+
+  /**
    * Get the underlying database instance for direct queries
    */
   get database(): DatabaseType {
@@ -99,27 +82,31 @@ export class DBService {
   /**
    * Get the database file path
    */
-  get path(): string {
+  get databasePath(): string {
     return this.dbPath;
   }
 
   /**
    * Run database migrations
+   * Translates: async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), Error>
    */
   private async runMigrations(): Promise<void> {
     // Create migrations tracking table if it doesn't exist
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS _migrations (
+      CREATE TABLE IF NOT EXISTS _sqlx_migrations (
         version INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
+        checksum BLOB,
         applied_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `);
 
     // Get list of applied migrations
     const appliedVersions = new Set(
-      this.db.prepare('SELECT version FROM _migrations').all()
-        .map((row: any) => row.version as number)
+      this.db
+        .prepare('SELECT version FROM _sqlx_migrations')
+        .all()
+        .map((row: any) => row.version as number),
     );
 
     // Define migrations (in order)
@@ -127,13 +114,11 @@ export class DBService {
 
     for (const migration of migrations) {
       if (!appliedVersions.has(migration.version)) {
-        console.log(`Applying migration ${migration.version}: ${migration.name}`);
-
         const transaction = this.db.transaction(() => {
           this.db.exec(migration.sql);
-          this.db.prepare(
-            'INSERT INTO _migrations (version, name) VALUES (?, ?)'
-          ).run(migration.version, migration.name);
+          this.db
+            .prepare('INSERT INTO _sqlx_migrations (version, name) VALUES (?, ?)')
+            .run(migration.version, migration.name);
         });
 
         transaction();
@@ -159,7 +144,7 @@ export class DBService {
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
           CREATE INDEX IF NOT EXISTS idx_projects_remote_project_id ON projects(remote_project_id);
-        `
+        `,
       },
       {
         version: 2,
@@ -182,7 +167,7 @@ export class DBService {
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
           CREATE INDEX IF NOT EXISTS idx_repos_path ON repos(path);
-        `
+        `,
       },
       {
         version: 3,
@@ -198,7 +183,7 @@ export class DBService {
           );
           CREATE INDEX IF NOT EXISTS idx_project_repos_project_id ON project_repos(project_id);
           CREATE INDEX IF NOT EXISTS idx_project_repos_repo_id ON project_repos(repo_id);
-        `
+        `,
       },
       {
         version: 4,
@@ -217,7 +202,7 @@ export class DBService {
           CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
           CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
           CREATE INDEX IF NOT EXISTS idx_tasks_parent_workspace_id ON tasks(parent_workspace_id);
-        `
+        `,
       },
       {
         version: 5,
@@ -239,7 +224,7 @@ export class DBService {
           CREATE INDEX IF NOT EXISTS idx_workspaces_task_id ON workspaces(task_id);
           CREATE INDEX IF NOT EXISTS idx_workspaces_container_ref ON workspaces(container_ref);
           CREATE INDEX IF NOT EXISTS idx_workspaces_archived ON workspaces(archived);
-        `
+        `,
       },
       {
         version: 6,
@@ -250,13 +235,13 @@ export class DBService {
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
             target_branch TEXT NOT NULL,
-            worktree_path TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(workspace_id, repo_id)
           );
           CREATE INDEX IF NOT EXISTS idx_workspace_repos_workspace_id ON workspace_repos(workspace_id);
           CREATE INDEX IF NOT EXISTS idx_workspace_repos_repo_id ON workspace_repos(repo_id);
-        `
+        `,
       },
       {
         version: 7,
@@ -270,7 +255,7 @@ export class DBService {
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
           CREATE INDEX IF NOT EXISTS idx_sessions_workspace_id ON sessions(workspace_id);
-        `
+        `,
       },
       {
         version: 8,
@@ -292,7 +277,7 @@ export class DBService {
           CREATE INDEX IF NOT EXISTS idx_execution_processes_session_id ON execution_processes(session_id);
           CREATE INDEX IF NOT EXISTS idx_execution_processes_status ON execution_processes(status);
           CREATE INDEX IF NOT EXISTS idx_execution_processes_run_reason ON execution_processes(run_reason);
-        `
+        `,
       },
       {
         version: 9,
@@ -304,28 +289,27 @@ export class DBService {
             repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
             before_head_commit TEXT,
             after_head_commit TEXT,
+            merge_commit TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(execution_process_id, repo_id)
           );
           CREATE INDEX IF NOT EXISTS idx_eprs_execution_process_id ON execution_process_repo_states(execution_process_id);
           CREATE INDEX IF NOT EXISTS idx_eprs_repo_id ON execution_process_repo_states(repo_id);
-        `
+        `,
       },
       {
         version: 10,
         name: 'create_execution_process_logs',
         sql: `
           CREATE TABLE IF NOT EXISTS execution_process_logs (
-            id TEXT PRIMARY KEY,
-            execution_process_id TEXT NOT NULL REFERENCES execution_processes(id) ON DELETE CASCADE,
-            log_type TEXT NOT NULL,
-            content TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            execution_id TEXT NOT NULL REFERENCES execution_processes(id) ON DELETE CASCADE,
+            logs TEXT NOT NULL,
+            byte_size INTEGER NOT NULL DEFAULT 0,
+            inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
-          CREATE INDEX IF NOT EXISTS idx_epl_execution_process_id ON execution_process_logs(execution_process_id);
-          CREATE INDEX IF NOT EXISTS idx_epl_sequence ON execution_process_logs(execution_process_id, sequence);
-        `
+          CREATE INDEX IF NOT EXISTS idx_epl_execution_id ON execution_process_logs(execution_id);
+        `,
       },
       {
         version: 11,
@@ -334,14 +318,17 @@ export class DBService {
           CREATE TABLE IF NOT EXISTS coding_agent_turns (
             id TEXT PRIMARY KEY,
             execution_process_id TEXT NOT NULL REFERENCES execution_processes(id) ON DELETE CASCADE,
-            turn_number INTEGER NOT NULL,
+            agent_session_id TEXT,
+            agent_message_id TEXT,
             prompt TEXT,
-            response TEXT,
-            tool_calls TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            summary TEXT,
+            seen INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
           CREATE INDEX IF NOT EXISTS idx_cat_execution_process_id ON coding_agent_turns(execution_process_id);
-        `
+          CREATE INDEX IF NOT EXISTS idx_cat_agent_session_id ON coding_agent_turns(agent_session_id);
+        `,
       },
       {
         version: 12,
@@ -349,46 +336,46 @@ export class DBService {
         sql: `
           CREATE TABLE IF NOT EXISTS images (
             id TEXT PRIMARY KEY,
-            task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
-            filename TEXT NOT NULL,
-            mime_type TEXT NOT NULL,
-            size INTEGER NOT NULL,
-            path TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            file_path TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            mime_type TEXT,
+            size_bytes INTEGER NOT NULL,
+            hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
-          CREATE INDEX IF NOT EXISTS idx_images_task_id ON images(task_id);
-        `
+          CREATE INDEX IF NOT EXISTS idx_images_hash ON images(hash);
+          CREATE INDEX IF NOT EXISTS idx_images_file_path ON images(file_path);
+        `,
       },
       {
         version: 13,
+        name: 'create_task_images',
+        sql: `
+          CREATE TABLE IF NOT EXISTS task_images (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            image_id TEXT NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(task_id, image_id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_task_images_task_id ON task_images(task_id);
+          CREATE INDEX IF NOT EXISTS idx_task_images_image_id ON task_images(image_id);
+        `,
+      },
+      {
+        version: 14,
         name: 'create_tags',
         sql: `
           CREATE TABLE IF NOT EXISTS tags (
             id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            color TEXT NOT NULL,
-            description TEXT,
+            tag_name TEXT NOT NULL UNIQUE,
+            content TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
-          CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
-        `
-      },
-      {
-        version: 14,
-        name: 'create_tag_assignments',
-        sql: `
-          CREATE TABLE IF NOT EXISTS tag_assignments (
-            id TEXT PRIMARY KEY,
-            tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-            entity_type TEXT NOT NULL,
-            entity_id TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            UNIQUE(tag_id, entity_type, entity_id)
-          );
-          CREATE INDEX IF NOT EXISTS idx_tag_assignments_tag_id ON tag_assignments(tag_id);
-          CREATE INDEX IF NOT EXISTS idx_tag_assignments_entity ON tag_assignments(entity_type, entity_id);
-        `
+          CREATE INDEX IF NOT EXISTS idx_tags_tag_name ON tags(tag_name);
+        `,
       },
       {
         version: 15,
@@ -396,37 +383,64 @@ export class DBService {
         sql: `
           CREATE TABLE IF NOT EXISTS scratch (
             id TEXT PRIMARY KEY,
-            type TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
-            metadata TEXT,
+            scratch_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-            UNIQUE(type, key)
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
-          CREATE INDEX IF NOT EXISTS idx_scratch_type_key ON scratch(type, key);
-        `
+          CREATE INDEX IF NOT EXISTS idx_scratch_type ON scratch(scratch_type);
+        `,
       },
       {
         version: 16,
         name: 'create_merges',
         sql: `
-          CREATE TABLE IF NOT EXISTS merges (
+          CREATE TABLE IF NOT EXISTS direct_merges (
             id TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-            source_branch TEXT NOT NULL,
-            target_branch TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            merge_commit TEXT,
-            error_message TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            completed_at TEXT
+            merge_commit TEXT NOT NULL,
+            target_branch_name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
           );
-          CREATE INDEX IF NOT EXISTS idx_merges_workspace_id ON merges(workspace_id);
-          CREATE INDEX IF NOT EXISTS idx_merges_status ON merges(status);
-        `
-      }
+          CREATE INDEX IF NOT EXISTS idx_direct_merges_workspace_id ON direct_merges(workspace_id);
+
+          CREATE TABLE IF NOT EXISTS pr_merges (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+            target_branch_name TEXT NOT NULL,
+            pr_number INTEGER NOT NULL,
+            pr_url TEXT NOT NULL,
+            pr_status TEXT NOT NULL DEFAULT 'open',
+            merged_at TEXT,
+            merge_commit_sha TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          CREATE INDEX IF NOT EXISTS idx_pr_merges_workspace_id ON pr_merges(workspace_id);
+          CREATE INDEX IF NOT EXISTS idx_pr_merges_status ON pr_merges(pr_status);
+        `,
+      },
+      {
+        version: 17,
+        name: 'create_migration_states',
+        sql: `
+          CREATE TABLE IF NOT EXISTS migration_states (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            local_id TEXT NOT NULL,
+            remote_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_message TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(entity_type, local_id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_migration_states_entity_type ON migration_states(entity_type);
+          CREATE INDEX IF NOT EXISTS idx_migration_states_status ON migration_states(status);
+        `,
+      },
     ];
   }
 
@@ -448,7 +462,7 @@ export class DBService {
    * Prepare a statement for repeated execution
    */
   prepare<BindParameters extends unknown[] | {} = unknown[], Result = unknown>(
-    sql: string
+    sql: string,
   ): Statement<BindParameters, Result> {
     return this.db.prepare(sql);
   }
@@ -463,6 +477,3 @@ export class DBService {
 
 // Re-export types
 export type { Database as DatabaseType, Statement } from 'better-sqlite3';
-
-// Type alias for backwards compatibility with deployment interface
-export type DbPool = DBService;

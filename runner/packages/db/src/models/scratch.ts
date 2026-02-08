@@ -3,195 +3,228 @@
  * Translates: crates/db/src/models/scratch.rs
  */
 
-import * as crypto from 'node:crypto';
-import type { DBService } from '../connection.js';
+import { randomUUID } from 'node:crypto';
+import type { DatabaseType } from '../connection.js';
+import type { ExecutorProfileId } from '@runner/executors';
+
+// --- Types ---
 
 export type ScratchType =
-  | 'note'
-  | 'snippet'
-  | 'todo'
-  | 'bookmark'
-  | 'preference'
-  | 'ui_state'
-  | 'custom';
+  | 'DRAFT_TASK'
+  | 'DRAFT_FOLLOW_UP'
+  | 'DRAFT_WORKSPACE'
+  | 'PREVIEW_SETTINGS'
+  | 'WORKSPACE_NOTES'
+  | 'UI_PREFERENCES';
 
-export interface ScratchItem {
+export interface DraftFollowUpData {
+  message: string;
+  executorProfileId: ExecutorProfileId;
+}
+
+export interface PreviewSettingsData {
+  url: string;
+  screenSize?: string;
+  responsiveWidth?: number;
+  responsiveHeight?: number;
+}
+
+export interface WorkspaceNotesData {
+  content: string;
+}
+
+export interface WorkspacePanelStateData {
+  rightMainPanelMode?: string;
+  isLeftMainPanelVisible: boolean;
+}
+
+export interface UiPreferencesData {
+  repoActions?: Record<string, string>;
+  expanded?: Record<string, boolean>;
+  contextBarPosition?: string;
+  paneSizes?: Record<string, unknown>;
+  collapsedPaths?: Record<string, string[]>;
+  isLeftSidebarVisible?: boolean;
+  isRightSidebarVisible?: boolean;
+  isTerminalVisible?: boolean;
+  workspacePanelStates?: Record<string, WorkspacePanelStateData>;
+}
+
+export interface DraftWorkspaceLinkedIssue {
+  issueId: string;
+  simpleId: string;
+  title: string;
+  remoteProjectId: string;
+}
+
+export interface DraftWorkspaceRepo {
+  repoId: string;
+  targetBranch: string;
+}
+
+export interface DraftWorkspaceData {
+  message: string;
+  projectId?: string;
+  repos: DraftWorkspaceRepo[];
+  selectedProfile?: ExecutorProfileId;
+  linkedIssue?: DraftWorkspaceLinkedIssue;
+}
+
+/**
+ * Tagged payload matching Rust's ScratchPayload enum.
+ * Serialized as { type: "DRAFT_TASK", data: "..." } etc.
+ */
+export type ScratchPayload =
+  | { type: 'DRAFT_TASK'; data: string }
+  | { type: 'DRAFT_FOLLOW_UP'; data: DraftFollowUpData }
+  | { type: 'DRAFT_WORKSPACE'; data: DraftWorkspaceData }
+  | { type: 'PREVIEW_SETTINGS'; data: PreviewSettingsData }
+  | { type: 'WORKSPACE_NOTES'; data: WorkspaceNotesData }
+  | { type: 'UI_PREFERENCES'; data: UiPreferencesData };
+
+export interface Scratch {
   id: string;
-  type: ScratchType;
-  key: string;
-  value: unknown;
-  metadata?: Record<string, unknown>;
+  payload: ScratchPayload;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface CreateScratchItem {
-  type: ScratchType;
-  key: string;
-  value: unknown;
-  metadata?: Record<string, unknown>;
+export interface CreateScratch {
+  payload: ScratchPayload;
 }
 
-export interface UpdateScratchItem {
-  value: unknown;
-  metadata?: Record<string, unknown>;
+export interface UpdateScratch {
+  payload: ScratchPayload;
 }
+
+// --- Error ---
+
+export class ScratchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScratchError';
+  }
+
+  static typeMismatch(expected: string, actual: string): ScratchError {
+    return new ScratchError(`Scratch type mismatch: expected '${expected}' but got '${actual}'`);
+  }
+}
+
+// --- Helpers ---
+
+export function scratchType(scratch: Scratch): ScratchType {
+  return scratch.payload.type;
+}
+
+// --- Row mapping ---
 
 interface ScratchRow {
   id: string;
-  type: string;
-  key: string;
-  value: string;
-  metadata: string | null;
+  scratch_type: string;
+  payload: string;
   created_at: string;
   updated_at: string;
 }
 
-function rowToScratchItem(row: ScratchRow): ScratchItem {
-  return {
-    id: row.id,
-    type: row.type as ScratchType,
-    key: row.key,
-    value: JSON.parse(row.value),
-    metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
-  };
+function rowToScratch(row: ScratchRow): Scratch | undefined {
+  try {
+    const payload: ScratchPayload = JSON.parse(row.payload);
+    if (payload.type !== row.scratch_type) {
+      return undefined;
+    }
+    return {
+      id: row.id,
+      payload,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
+// --- Repository ---
+
 export class ScratchRepository {
-  constructor(private db: DBService) {}
+  constructor(private db: DatabaseType) {}
 
-  /**
-   * Find all scratch items, optionally filtered by type
-   */
-  findAll(type?: ScratchType): ScratchItem[] {
-    let rows: ScratchRow[];
+  create(id: string, data: CreateScratch): Scratch {
+    const scratchTypeStr = data.payload.type;
+    const payloadStr = JSON.stringify(data.payload);
 
-    if (type) {
-      rows = this.db.database.prepare(`
-        SELECT id, type, key, value, metadata, created_at, updated_at
-        FROM scratch
-        WHERE type = ?
-        ORDER BY updated_at DESC
-      `).all(type) as ScratchRow[];
-    } else {
-      rows = this.db.database.prepare(`
-        SELECT id, type, key, value, metadata, created_at, updated_at
-        FROM scratch
-        ORDER BY updated_at DESC
-      `).all() as ScratchRow[];
-    }
+    this.db.prepare(`
+      INSERT INTO scratch (id, scratch_type, payload)
+      VALUES (?, ?, ?)
+    `).run(id, scratchTypeStr, payloadStr);
 
-    return rows.map(rowToScratchItem);
-  }
-
-  /**
-   * Find scratch item by type and key
-   */
-  findByTypeAndKey(type: string, key: string): ScratchItem | undefined {
-    const row = this.db.database.prepare(`
-      SELECT id, type, key, value, metadata, created_at, updated_at
+    const row = this.db.prepare(`
+      SELECT id, scratch_type, payload, created_at, updated_at
       FROM scratch
-      WHERE type = ? AND key = ?
-    `).get(type, key) as ScratchRow | undefined;
+      WHERE id = ? AND scratch_type = ?
+    `).get(id, scratchTypeStr) as ScratchRow;
 
-    return row ? rowToScratchItem(row) : undefined;
+    return rowToScratch(row)!;
   }
 
-  /**
-   * Find scratch item by ID
-   */
-  findById(id: string): ScratchItem | undefined {
-    const row = this.db.database.prepare(`
-      SELECT id, type, key, value, metadata, created_at, updated_at
+  findById(id: string, scratchTypeVal: ScratchType): Scratch | undefined {
+    const row = this.db.prepare(`
+      SELECT id, scratch_type, payload, created_at, updated_at
       FROM scratch
-      WHERE id = ?
-    `).get(id) as ScratchRow | undefined;
+      WHERE id = ? AND scratch_type = ?
+    `).get(id, scratchTypeVal) as ScratchRow | undefined;
 
-    return row ? rowToScratchItem(row) : undefined;
+    return row ? rowToScratch(row) : undefined;
+  }
+
+  findAll(): Scratch[] {
+    const rows = this.db.prepare(`
+      SELECT id, scratch_type, payload, created_at, updated_at
+      FROM scratch
+      ORDER BY created_at DESC
+    `).all() as ScratchRow[];
+
+    return rows
+      .map(rowToScratch)
+      .filter((s): s is Scratch => s !== undefined);
   }
 
   /**
-   * Create a new scratch item
+   * Upsert a scratch record - creates if not exists, updates if exists.
    */
-  create(data: CreateScratchItem, itemId?: string): ScratchItem {
-    const id = itemId ?? crypto.randomUUID();
-    const now = new Date().toISOString();
-    const valueJson = JSON.stringify(data.value);
-    const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
+  update(id: string, scratchTypeVal: ScratchType, data: UpdateScratch): Scratch {
+    const payloadStr = JSON.stringify(data.payload);
 
-    this.db.database.prepare(`
-      INSERT INTO scratch (id, type, key, value, metadata, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, data.type, data.key, valueJson, metadataJson, now, now);
+    this.db.prepare(`
+      INSERT INTO scratch (id, scratch_type, payload)
+      VALUES (?, ?, ?)
+      ON CONFLICT(id, scratch_type) DO UPDATE SET
+        payload = excluded.payload,
+        updated_at = datetime('now', 'subsec')
+    `).run(id, scratchTypeVal, payloadStr);
 
-    return this.findById(id)!;
+    const row = this.db.prepare(`
+      SELECT id, scratch_type, payload, created_at, updated_at
+      FROM scratch
+      WHERE id = ? AND scratch_type = ?
+    `).get(id, scratchTypeVal) as ScratchRow;
+
+    return rowToScratch(row)!;
   }
 
-  /**
-   * Update or insert a scratch item (upsert)
-   */
-  upsert(type: string, key: string, value: unknown, metadata?: Record<string, unknown>): ScratchItem {
-    const existing = this.findByTypeAndKey(type, key);
-    const now = new Date().toISOString();
-    const valueJson = JSON.stringify(value);
-    const metadataJson = metadata ? JSON.stringify(metadata) : null;
-
-    if (existing) {
-      this.db.database.prepare(`
-        UPDATE scratch SET value = ?, metadata = ?, updated_at = ?
-        WHERE type = ? AND key = ?
-      `).run(valueJson, metadataJson, now, type, key);
-      return this.findByTypeAndKey(type, key)!;
-    } else {
-      const id = crypto.randomUUID();
-      this.db.database.prepare(`
-        INSERT INTO scratch (id, type, key, value, metadata, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(id, type, key, valueJson, metadataJson, now, now);
-      return this.findById(id)!;
-    }
-  }
-
-  /**
-   * Update a scratch item
-   */
-  update(type: string, key: string, data: UpdateScratchItem): ScratchItem | undefined {
-    const existing = this.findByTypeAndKey(type, key);
-    if (!existing) return undefined;
-
-    const now = new Date().toISOString();
-    const valueJson = JSON.stringify(data.value);
-    const metadataJson = data.metadata
-      ? JSON.stringify(data.metadata)
-      : (existing.metadata ? JSON.stringify(existing.metadata) : null);
-
-    this.db.database.prepare(`
-      UPDATE scratch SET value = ?, metadata = ?, updated_at = ?
-      WHERE type = ? AND key = ?
-    `).run(valueJson, metadataJson, now, type, key);
-
-    return this.findByTypeAndKey(type, key);
-  }
-
-  /**
-   * Delete a scratch item
-   */
-  delete(type: string, key: string): number {
-    const result = this.db.database.prepare(
-      'DELETE FROM scratch WHERE type = ? AND key = ?'
-    ).run(type, key);
+  delete(id: string, scratchTypeVal: ScratchType): number {
+    const result = this.db.prepare(
+      'DELETE FROM scratch WHERE id = ? AND scratch_type = ?',
+    ).run(id, scratchTypeVal);
     return result.changes;
   }
 
-  /**
-   * Delete by ID
-   */
-  deleteById(id: string): number {
-    const result = this.db.database.prepare(
-      'DELETE FROM scratch WHERE id = ?'
-    ).run(id);
-    return result.changes;
+  findByRowid(rowid: number): Scratch | undefined {
+    const row = this.db.prepare(`
+      SELECT id, scratch_type, payload, created_at, updated_at
+      FROM scratch
+      WHERE rowid = ?
+    `).get(rowid) as ScratchRow | undefined;
+
+    return row ? rowToScratch(row) : undefined;
   }
 }

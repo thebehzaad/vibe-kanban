@@ -53,7 +53,7 @@ interface RepoRow {
   updated_at: string;
 }
 
-function rowToRepo(row: RepoRow): Repo {
+export function rowToRepo(row: RepoRow): Repo {
   return {
     id: row.id,
     path: row.path,

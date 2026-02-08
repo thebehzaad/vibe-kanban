@@ -6,5 +6,8 @@
     "tsBuildInfoFile": "./tsconfig.tsbuildinfo"
   },
   "include": ["src/**/*"],
-  "references": []
+  "references": [
+    { "path": "../utils" },
+    { "path": "../executors" }
+  ]
 }

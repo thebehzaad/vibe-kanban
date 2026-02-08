@@ -3,8 +3,29 @@
  * Translates: crates/db/src/models/session.rs
  */
 
-import * as crypto from 'node:crypto';
-import type { DBService } from '../connection.js';
+import { randomUUID } from 'node:crypto';
+import type { DatabaseType } from '../connection.js';
+
+// --- Error ---
+
+export class SessionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionError';
+  }
+
+  static notFound(): SessionError {
+    return new SessionError('Session not found');
+  }
+
+  static workspaceNotFound(): SessionError {
+    return new SessionError('Workspace not found');
+  }
+
+  static executorMismatch(expected: string, actual: string): SessionError {
+    return new SessionError(`Executor mismatch: session uses ${expected} but request specified ${actual}`);
+  }
+}
 
 export interface Session {
   id: string;
@@ -37,13 +58,13 @@ function rowToSession(row: SessionRow): Session {
 }
 
 export class SessionRepository {
-  constructor(private db: DBService) {}
+  constructor(private db: DatabaseType) {}
 
   /**
    * Find session by ID
    */
   findById(id: string): Session | undefined {
-    const row = this.db.database.prepare(`
+    const row = this.db.prepare(`
       SELECT id, workspace_id, executor, created_at, updated_at
       FROM sessions
       WHERE id = ?
@@ -56,7 +77,7 @@ export class SessionRepository {
    * Find all sessions for a workspace, ordered by most recently used.
    */
   findByWorkspaceId(workspaceId: string): Session[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT s.id, s.workspace_id, s.executor, s.created_at, s.updated_at
       FROM sessions s
       LEFT JOIN (
@@ -76,7 +97,7 @@ export class SessionRepository {
    * Find the most recently used session for a workspace.
    */
   findLatestByWorkspaceId(workspaceId: string): Session | undefined {
-    const row = this.db.database.prepare(`
+    const row = this.db.prepare(`
       SELECT s.id, s.workspace_id, s.executor, s.created_at, s.updated_at
       FROM sessions s
       LEFT JOIN (
@@ -99,7 +120,7 @@ export class SessionRepository {
   create(data: CreateSession, sessionId: string, workspaceId: string): Session {
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
+    this.db.prepare(`
       INSERT INTO sessions (id, workspace_id, executor, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?)
     `).run(sessionId, workspaceId, data.executor ?? null, now, now);
@@ -112,7 +133,7 @@ export class SessionRepository {
    */
   updateExecutor(id: string, executor: string): void {
     const now = new Date().toISOString();
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE sessions SET executor = ?, updated_at = ? WHERE id = ?
     `).run(executor, now, id);
   }
@@ -121,7 +142,7 @@ export class SessionRepository {
    * Delete a session
    */
   delete(id: string): number {
-    const result = this.db.database.prepare(
+    const result = this.db.prepare(
       'DELETE FROM sessions WHERE id = ?'
     ).run(id);
     return result.changes;
