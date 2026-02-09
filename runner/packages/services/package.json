@@ -20,6 +20,8 @@
   },
   "dependencies": {
     "@runner/db": "workspace:*",
+    "@runner/executors": "workspace:*",
+    "@runner/git": "workspace:*",
     "@runner/utils": "workspace:*"
   },
   "devDependencies": {

@@ -7,6 +7,25 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseType } from '../connection.js';
 import type { CreateProjectRepo } from './project-repo.js';
 
+// --- Error ---
+
+export class ProjectError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectError';
+  }
+
+  static notFound(): ProjectError {
+    return new ProjectError('Project not found');
+  }
+
+  static createFailed(reason: string): ProjectError {
+    return new ProjectError(`Failed to create project: ${reason}`);
+  }
+}
+
+// --- Types ---
+
 export interface Project {
   id: string;
   name: string;
@@ -18,6 +37,7 @@ export interface Project {
 
 export interface CreateProject {
   name: string;
+  repositories: CreateProjectRepo[];
 }
 
 export interface UpdateProject {
@@ -32,6 +52,8 @@ export interface SearchResult {
 }
 
 export type SearchMatchType = 'FileName' | 'DirectoryName' | 'FullPath';
+
+// --- Row mapping ---
 
 interface ProjectRow {
   id: string;
@@ -53,24 +75,20 @@ function rowToProject(row: ProjectRow): Project {
   };
 }
 
-export class ProjectRepository {
-  constructor(private db: DBService) {}
+// --- Repository ---
 
-  /**
-   * Count total projects
-   */
+export class ProjectRepository {
+  constructor(private db: DatabaseType) {}
+
   count(): number {
-    const row = this.db.database.prepare(
+    const row = this.db.prepare(
       'SELECT COUNT(*) as count FROM projects'
     ).get() as { count: number };
     return row.count;
   }
 
-  /**
-   * Find all projects, ordered by created_at DESC
-   */
   findAll(): Project[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT id, name, default_agent_working_dir, remote_project_id, created_at, updated_at
       FROM projects
       ORDER BY created_at DESC
@@ -79,11 +97,8 @@ export class ProjectRepository {
     return rows.map(rowToProject);
   }
 
-  /**
-   * Find the most actively used projects based on recent task activity
-   */
   findMostActive(limit: number): Project[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT p.id, p.name, p.default_agent_working_dir, p.remote_project_id, p.created_at, p.updated_at
       FROM projects p
       WHERE p.id IN (
@@ -98,11 +113,8 @@ export class ProjectRepository {
     return rows.map(rowToProject);
   }
 
-  /**
-   * Find project by ID
-   */
   findById(id: string): Project | undefined {
-    const row = this.db.database.prepare(`
+    const row = this.db.prepare(`
       SELECT id, name, default_agent_working_dir, remote_project_id, created_at, updated_at
       FROM projects
       WHERE id = ?
@@ -111,11 +123,18 @@ export class ProjectRepository {
     return row ? rowToProject(row) : undefined;
   }
 
-  /**
-   * Find project by remote project ID
-   */
+  findByRowid(rowid: number): Project | undefined {
+    const row = this.db.prepare(`
+      SELECT id, name, default_agent_working_dir, remote_project_id, created_at, updated_at
+      FROM projects
+      WHERE rowid = ?
+    `).get(rowid) as ProjectRow | undefined;
+
+    return row ? rowToProject(row) : undefined;
+  }
+
   findByRemoteProjectId(remoteProjectId: string): Project | undefined {
-    const row = this.db.database.prepare(`
+    const row = this.db.prepare(`
       SELECT id, name, default_agent_working_dir, remote_project_id, created_at, updated_at
       FROM projects
       WHERE remote_project_id = ?
@@ -125,14 +144,11 @@ export class ProjectRepository {
     return row ? rowToProject(row) : undefined;
   }
 
-  /**
-   * Create a new project
-   */
   create(data: CreateProject, projectId?: string): Project {
-    const id = projectId ?? crypto.randomUUID();
+    const id = projectId ?? randomUUID();
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
+    this.db.prepare(`
       INSERT INTO projects (id, name, created_at, updated_at)
       VALUES (?, ?, ?, ?)
     `).run(id, data.name, now, now);
@@ -140,9 +156,6 @@ export class ProjectRepository {
     return this.findById(id)!;
   }
 
-  /**
-   * Update a project
-   */
   update(id: string, payload: UpdateProject): Project | undefined {
     const existing = this.findById(id);
     if (!existing) return undefined;
@@ -150,7 +163,7 @@ export class ProjectRepository {
     const name = payload.name ?? existing.name;
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE projects
       SET name = ?, updated_at = ?
       WHERE id = ?
@@ -159,22 +172,16 @@ export class ProjectRepository {
     return this.findById(id);
   }
 
-  /**
-   * Set remote project ID
-   */
   setRemoteProjectId(id: string, remoteProjectId?: string): void {
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE projects
       SET remote_project_id = ?
       WHERE id = ?
     `).run(remoteProjectId ?? null, id);
   }
 
-  /**
-   * Delete a project
-   */
   delete(id: string): number {
-    const result = this.db.database.prepare(
+    const result = this.db.prepare(
       'DELETE FROM projects WHERE id = ?'
     ).run(id);
     return result.changes;

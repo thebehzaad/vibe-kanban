@@ -3,9 +3,24 @@
  * Translates: crates/db/src/models/repo.rs
  */
 
-import * as crypto from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import type { DBService } from '../connection.js';
+import type { DatabaseType } from '../connection.js';
+
+// --- Error ---
+
+export class RepoError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RepoError';
+  }
+
+  static notFound(): RepoError {
+    return new RepoError('Repository not found');
+  }
+}
+
+// --- Types ---
 
 export interface Repo {
   id: string;
@@ -35,6 +50,8 @@ export interface UpdateRepo {
   defaultTargetBranch?: string | null;
   defaultWorkingDir?: string | null;
 }
+
+// --- Row mapping ---
 
 interface RepoRow {
   id: string;
@@ -72,14 +89,13 @@ export function rowToRepo(row: RepoRow): Repo {
   };
 }
 
-export class RepoRepository {
-  constructor(private db: DBService) {}
+// --- Repository ---
 
-  /**
-   * Find repo by ID
-   */
+export class RepoRepository {
+  constructor(private db: DatabaseType) {}
+
   findById(id: string): Repo | undefined {
-    const row = this.db.database.prepare(`
+    const row = this.db.prepare(`
       SELECT id, path, name, display_name, setup_script, cleanup_script, archive_script,
              copy_files, parallel_setup_script, dev_server_script, default_target_branch,
              default_working_dir, created_at, updated_at
@@ -90,9 +106,6 @@ export class RepoRepository {
     return row ? rowToRepo(row) : undefined;
   }
 
-  /**
-   * Find repos by IDs
-   */
   findByIds(ids: string[]): Repo[] {
     if (ids.length === 0) return [];
 
@@ -104,11 +117,8 @@ export class RepoRepository {
     return repos;
   }
 
-  /**
-   * Find repo by path
-   */
   findByPath(repoPath: string): Repo | undefined {
-    const row = this.db.database.prepare(`
+    const row = this.db.prepare(`
       SELECT id, path, name, display_name, setup_script, cleanup_script, archive_script,
              copy_files, parallel_setup_script, dev_server_script, default_target_branch,
              default_working_dir, created_at, updated_at
@@ -119,11 +129,8 @@ export class RepoRepository {
     return row ? rowToRepo(row) : undefined;
   }
 
-  /**
-   * List all repos
-   */
   listAll(): Repo[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT id, path, name, display_name, setup_script, cleanup_script, archive_script,
              copy_files, parallel_setup_script, dev_server_script, default_target_branch,
              default_working_dir, created_at, updated_at
@@ -134,11 +141,8 @@ export class RepoRepository {
     return rows.map(rowToRepo);
   }
 
-  /**
-   * Find repos needing name fix
-   */
   listNeedingNameFix(): Repo[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT id, path, name, display_name, setup_script, cleanup_script, archive_script,
              copy_files, parallel_setup_script, dev_server_script, default_target_branch,
              default_working_dir, created_at, updated_at
@@ -149,18 +153,15 @@ export class RepoRepository {
     return rows.map(rowToRepo);
   }
 
-  /**
-   * Find or create repo by path
-   */
   findOrCreate(repoPath: string, displayName: string): Repo {
     const existing = this.findByPath(repoPath);
     if (existing) return existing;
 
-    const id = crypto.randomUUID();
+    const id = randomUUID();
     const name = path.basename(repoPath) || id;
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
+    this.db.prepare(`
       INSERT INTO repos (id, path, name, display_name, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET updated_at = updated_at
@@ -169,19 +170,13 @@ export class RepoRepository {
     return this.findByPath(repoPath)!;
   }
 
-  /**
-   * Update repo name
-   */
   updateName(id: string, name: string, displayName: string): void {
     const now = new Date().toISOString();
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE repos SET name = ?, display_name = ?, updated_at = ? WHERE id = ?
     `).run(name, displayName, now, id);
   }
 
-  /**
-   * Update repo
-   */
   update(id: string, payload: UpdateRepo): Repo | undefined {
     const existing = this.findById(id);
     if (!existing) return undefined;
@@ -216,7 +211,7 @@ export class RepoRepository {
 
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE repos SET
         display_name = ?,
         setup_script = ?,
@@ -246,11 +241,8 @@ export class RepoRepository {
     return this.findById(id);
   }
 
-  /**
-   * Delete orphaned repos
-   */
   deleteOrphaned(): number {
-    const result = this.db.database.prepare(`
+    const result = this.db.prepare(`
       DELETE FROM repos
       WHERE id NOT IN (SELECT repo_id FROM project_repos)
         AND id NOT IN (SELECT repo_id FROM workspace_repos)

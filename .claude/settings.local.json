@@ -5,7 +5,9 @@
       "Bash(pnpm run build:*)",
       "Bash(dir:*)",
       "Bash(tail:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(wc -l:*)",
+      "Bash(find:*)"
     ]
   }
 }

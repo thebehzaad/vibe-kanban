@@ -1,68 +1,82 @@
 /**
- * Queued message service - Follow-up message queuing
+ * Queued message service
  * Translates: crates/services/src/queued_message.rs
+ *
+ * In-memory service for managing queued follow-up messages.
+ * One queued message per session.
  */
 
+import type { DraftFollowUpData } from '@runner/db';
+
+// ── Types ──
+
+/** Represents a queued follow-up message for a session */
 export interface QueuedMessage {
-  id: string;
-  workspaceId: string;
+  /** The session this message is queued for */
   sessionId: string;
-  prompt: string;
-  createdAt: Date;
+  /** The follow-up data (message + variant) */
+  data: DraftFollowUpData;
+  /** Timestamp when the message was queued */
+  queuedAt: Date;
 }
 
+/** Status of the queue for a session (for frontend display) */
+export type QueueStatus =
+  | { status: 'empty' }
+  | { status: 'queued'; message: QueuedMessage };
+
+// ── Service ──
+
 export class QueuedMessageService {
-  private queues = new Map<string, QueuedMessage[]>();
+  private queue = new Map<string, QueuedMessage>();
 
-  /** Queue a follow-up message for a workspace */
-  enqueue(workspaceId: string, sessionId: string, prompt: string): QueuedMessage {
-    const msg: QueuedMessage = {
-      id: crypto.randomUUID(),
-      workspaceId,
+  /** Queue a message for a session. Replaces any existing queued message. */
+  queueMessage(sessionId: string, data: DraftFollowUpData): QueuedMessage {
+    const queued: QueuedMessage = {
       sessionId,
-      prompt,
-      createdAt: new Date(),
+      data,
+      queuedAt: new Date(),
     };
+    this.queue.set(sessionId, queued);
+    return queued;
+  }
 
-    if (!this.queues.has(workspaceId)) {
-      this.queues.set(workspaceId, []);
+  /** Cancel/remove a queued message for a session */
+  cancelQueued(sessionId: string): QueuedMessage | undefined {
+    const msg = this.queue.get(sessionId);
+    if (msg) {
+      this.queue.delete(sessionId);
     }
-    this.queues.get(workspaceId)!.push(msg);
-
     return msg;
   }
 
-  /** Dequeue the next message for a workspace */
-  dequeue(workspaceId: string): QueuedMessage | undefined {
-    const queue = this.queues.get(workspaceId);
-    if (!queue || queue.length === 0) return undefined;
-    return queue.shift();
+  /** Get the queued message for a session (if any) */
+  getQueued(sessionId: string): QueuedMessage | undefined {
+    const msg = this.queue.get(sessionId);
+    return msg ? { ...msg } : undefined;
   }
 
-  /** Peek at the next message without removing it */
-  peek(workspaceId: string): QueuedMessage | undefined {
-    const queue = this.queues.get(workspaceId);
-    return queue?.[0];
+  /** Take (remove and return) the queued message for a session.
+   *  Used by finalization flow to consume the queued message. */
+  takeQueued(sessionId: string): QueuedMessage | undefined {
+    const msg = this.queue.get(sessionId);
+    if (msg) {
+      this.queue.delete(sessionId);
+    }
+    return msg;
   }
 
-  /** Check if a workspace has queued messages */
-  hasMessages(workspaceId: string): boolean {
-    const queue = this.queues.get(workspaceId);
-    return !!queue && queue.length > 0;
+  /** Check if a session has a queued message */
+  hasQueued(sessionId: string): boolean {
+    return this.queue.has(sessionId);
   }
 
-  /** Get all queued messages for a workspace */
-  getAll(workspaceId: string): QueuedMessage[] {
-    return this.queues.get(workspaceId) ?? [];
-  }
-
-  /** Clear all messages for a workspace */
-  clear(workspaceId: string): void {
-    this.queues.delete(workspaceId);
-  }
-
-  /** Clear all queues */
-  clearAll(): void {
-    this.queues.clear();
+  /** Get queue status for frontend display */
+  getStatus(sessionId: string): QueueStatus {
+    const msg = this.getQueued(sessionId);
+    if (msg) {
+      return { status: 'queued', message: msg };
+    }
+    return { status: 'empty' };
   }
 }

@@ -8,6 +8,8 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../db" },
+    { "path": "../executors" },
+    { "path": "../git" },
     { "path": "../utils" }
   ]
 }

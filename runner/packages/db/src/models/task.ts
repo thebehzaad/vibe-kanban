@@ -3,8 +3,11 @@
  * Translates: crates/db/src/models/task.rs
  */
 
-import * as crypto from 'node:crypto';
-import type { DBService } from '../connection.js';
+import { randomUUID } from 'node:crypto';
+import type { DatabaseType } from '../connection.js';
+import type { Workspace } from './workspace.js';
+
+// --- Types ---
 
 export type TaskStatus = 'todo' | 'inprogress' | 'inreview' | 'done' | 'cancelled';
 
@@ -25,6 +28,12 @@ export interface TaskWithAttemptStatus extends Task {
   executor: string;
 }
 
+export interface TaskRelationships {
+  parentTask?: Task;
+  currentWorkspace: Workspace;
+  children: Task[];
+}
+
 export interface CreateTask {
   projectId: string;
   title: string;
@@ -41,6 +50,8 @@ export interface UpdateTask {
   parentWorkspaceId?: string;
   imageIds?: string[];
 }
+
+// --- Row mapping ---
 
 interface TaskRow {
   id: string;
@@ -66,12 +77,11 @@ function rowToTask(row: TaskRow): Task {
   };
 }
 
-export class TaskRepository {
-  constructor(private db: DBService) {}
+// --- Repository ---
 
-  /**
-   * Get prompt string for a task
-   */
+export class TaskRepository {
+  constructor(private db: DatabaseType) {}
+
   static toPrompt(task: Task): string {
     if (task.description && task.description.trim()) {
       return `${task.title}\n\n${task.description}`;
@@ -79,11 +89,19 @@ export class TaskRepository {
     return task.title;
   }
 
-  /**
-   * Find all tasks
-   */
+  static fromTitleDescription(projectId: string, title: string, description?: string): CreateTask {
+    return {
+      projectId,
+      title,
+      description,
+      status: 'todo',
+      parentWorkspaceId: undefined,
+      imageIds: undefined,
+    };
+  }
+
   findAll(): Task[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT id, project_id, title, description, status, parent_workspace_id, created_at, updated_at
       FROM tasks
       ORDER BY created_at ASC
@@ -92,11 +110,8 @@ export class TaskRepository {
     return rows.map(rowToTask);
   }
 
-  /**
-   * Find tasks by project ID with attempt status
-   */
   findByProjectIdWithAttemptStatus(projectId: string): TaskWithAttemptStatus[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT
         t.id,
         t.project_id,
@@ -152,11 +167,8 @@ export class TaskRepository {
     }));
   }
 
-  /**
-   * Find task by ID
-   */
   findById(id: string): Task | undefined {
-    const row = this.db.database.prepare(`
+    const row = this.db.prepare(`
       SELECT id, project_id, title, description, status, parent_workspace_id, created_at, updated_at
       FROM tasks
       WHERE id = ?
@@ -165,11 +177,18 @@ export class TaskRepository {
     return row ? rowToTask(row) : undefined;
   }
 
-  /**
-   * Find tasks by parent workspace ID
-   */
+  findByRowid(rowid: number): Task | undefined {
+    const row = this.db.prepare(`
+      SELECT id, project_id, title, description, status, parent_workspace_id, created_at, updated_at
+      FROM tasks
+      WHERE rowid = ?
+    `).get(rowid) as TaskRow | undefined;
+
+    return row ? rowToTask(row) : undefined;
+  }
+
   findChildrenByWorkspaceId(workspaceId: string): Task[] {
-    const rows = this.db.database.prepare(`
+    const rows = this.db.prepare(`
       SELECT id, project_id, title, description, status, parent_workspace_id, created_at, updated_at
       FROM tasks
       WHERE parent_workspace_id = ?
@@ -179,15 +198,12 @@ export class TaskRepository {
     return rows.map(rowToTask);
   }
 
-  /**
-   * Create a new task
-   */
   create(data: CreateTask, taskId?: string): Task {
-    const id = taskId ?? crypto.randomUUID();
+    const id = taskId ?? randomUUID();
     const status = data.status ?? 'todo';
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
+    this.db.prepare(`
       INSERT INTO tasks (id, project_id, title, description, status, parent_workspace_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
@@ -204,9 +220,6 @@ export class TaskRepository {
     return this.findById(id)!;
   }
 
-  /**
-   * Update a task
-   */
   update(id: string, projectId: string, data: UpdateTask): Task | undefined {
     const existing = this.findById(id);
     if (!existing || existing.projectId !== projectId) return undefined;
@@ -217,7 +230,7 @@ export class TaskRepository {
     const parentWorkspaceId = data.parentWorkspaceId ?? existing.parentWorkspaceId;
     const now = new Date().toISOString();
 
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE tasks
       SET title = ?, description = ?, status = ?, parent_workspace_id = ?, updated_at = ?
       WHERE id = ? AND project_id = ?
@@ -234,43 +247,61 @@ export class TaskRepository {
     return this.findById(id);
   }
 
-  /**
-   * Update task status
-   */
   updateStatus(id: string, status: TaskStatus): void {
     const now = new Date().toISOString();
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?
     `).run(status, now, id);
   }
 
-  /**
-   * Update parent workspace ID
-   */
   updateParentWorkspaceId(taskId: string, parentWorkspaceId?: string): void {
     const now = new Date().toISOString();
-    this.db.database.prepare(`
+    this.db.prepare(`
       UPDATE tasks SET parent_workspace_id = ?, updated_at = ? WHERE id = ?
     `).run(parentWorkspaceId ?? null, now, taskId);
   }
 
-  /**
-   * Nullify children by workspace ID
-   */
   nullifyChildrenByWorkspaceId(workspaceId: string): number {
-    const result = this.db.database.prepare(`
+    const result = this.db.prepare(`
       UPDATE tasks SET parent_workspace_id = NULL WHERE parent_workspace_id = ?
     `).run(workspaceId);
     return result.changes;
   }
 
-  /**
-   * Delete a task
-   */
   delete(id: string): number {
-    const result = this.db.database.prepare(
+    const result = this.db.prepare(
       'DELETE FROM tasks WHERE id = ?'
     ).run(id);
     return result.changes;
+  }
+
+  findRelationshipsForWorkspace(workspace: Workspace): TaskRelationships {
+    // 1. Get the current task (task that owns this workspace)
+    const currentTask = this.findById(workspace.taskId);
+    if (!currentTask) throw new Error('Task not found for workspace');
+
+    // 2. Get parent task (if current task was created by another workspace)
+    let parentTask: Task | undefined;
+    if (currentTask.parentWorkspaceId) {
+      const parentWsRow = this.db.prepare(`
+        SELECT id, task_id, container_ref, branch, agent_working_dir, setup_completed_at,
+               archived, pinned, name, created_at, updated_at
+        FROM workspaces
+        WHERE id = ?
+      `).get(currentTask.parentWorkspaceId) as any | undefined;
+
+      if (parentWsRow) {
+        parentTask = this.findById(parentWsRow.task_id);
+      }
+    }
+
+    // 3. Get children tasks (created from this workspace)
+    const children = this.findChildrenByWorkspaceId(workspace.id);
+
+    return {
+      parentTask,
+      currentWorkspace: workspace,
+      children,
+    };
   }
 }

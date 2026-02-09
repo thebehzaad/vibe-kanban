@@ -17,6 +17,12 @@ importers:
 
   packages/db:
     dependencies:
+      '@runner/executors':
+        specifier: workspace:*
+        version: link:../executors
+      '@runner/utils':
+        specifier: workspace:*
+        version: link:../utils
       better-sqlite3:
         specifier: ^11.8.1
         version: 11.10.0
