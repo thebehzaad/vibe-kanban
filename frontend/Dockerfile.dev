@@ -1,0 +1,23 @@
+# Use Node.js LTS version
+FROM node:20-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Install pnpm globally
+RUN npm install -g pnpm@latest
+
+# Copy package files
+COPY package.json ./
+
+# Install dependencies (no frozen lockfile for cross-platform compatibility)
+RUN pnpm install --no-frozen-lockfile
+
+# Copy the rest of the application
+COPY . .
+
+# Expose the default Vite port
+EXPOSE 3000
+
+# Start the development server
+CMD ["pnpm", "run", "dev"]

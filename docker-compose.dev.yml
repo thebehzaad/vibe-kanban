@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: crates/Dockerfile.dev
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    volumes:
+      # Mount source code for hot reload
+      - ./crates:/app/crates
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./rust-toolchain.toml:/app/rust-toolchain.toml
+      - ./rustfmt.toml:/app/rustfmt.toml
+      # Mount assets and scripts if needed
+      - ./assets:/app/assets
+      - ./scripts:/app/scripts
+      # Preserve cargo registry and build cache
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    environment:
+      - BACKEND_PORT=3001
+      - FRONTEND_PORT=${FRONTEND_PORT:-3000}
+      - RUST_LOG=${RUST_LOG:-debug}
+      - DISABLE_WORKTREE_CLEANUP=1
+      - VK_ALLOWED_ORIGINS=http://localhost:${FRONTEND_PORT:-3000}
+      # Add any other environment variables you need
+    stdin_open: true
+    tty: true
+    networks:
+      - vibe-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    volumes:
+      # Mount source code for hot reload
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tailwind.new.config.js:/app/tailwind.new.config.js
+      - ./frontend/tailwind.legacy.config.js:/app/tailwind.legacy.config.js
+      - ./frontend/postcss.config.cjs:/app/postcss.config.cjs
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      # Mount shared folder for types
+      - ./shared:/app/shared:ro
+      # Exclude node_modules from being mounted
+      - /app/node_modules
+    environment:
+      - FRONTEND_PORT=3000
+      - BACKEND_PORT=3001
+      - VITE_OPEN=false
+      # Override backend URL for Docker networking
+      - VITE_API_PROXY_TARGET=http://backend:3001
+    depends_on:
+      - backend
+    stdin_open: true
+    tty: true
+    networks:
+      - vibe-network
+
+networks:
+  vibe-network:
+    driver: bridge
+
+volumes:
+  cargo-cache:
+  target-cache:
