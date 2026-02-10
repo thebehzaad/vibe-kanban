@@ -7,7 +7,9 @@
       "Bash(tail:*)",
       "Bash(npx tsc:*)",
       "Bash(wc -l:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(docker compose:*)",
+      "Bash(timeout:*)"
     ]
   }
 }

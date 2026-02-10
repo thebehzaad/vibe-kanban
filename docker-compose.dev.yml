@@ -16,6 +16,8 @@ services:
       # Mount assets and scripts if needed
       - ./assets:/app/assets
       - ./scripts:/app/scripts
+      # Mount host git repos so backend can access them
+      - ${GIT_REPOS_PATH:-~/git_repos}:/repos
       # Preserve cargo registry and build cache
       - cargo-cache:/usr/local/cargo/registry
       - target-cache:/app/target
@@ -25,7 +27,8 @@ services:
       - RUST_LOG=${RUST_LOG:-debug}
       - DISABLE_WORKTREE_CLEANUP=1
       - VK_ALLOWED_ORIGINS=http://localhost:${FRONTEND_PORT:-3000}
-      # Add any other environment variables you need
+      # Bind to all interfaces so frontend container can reach backend
+      - HOST=0.0.0.0
     stdin_open: true
     tty: true
     networks:
